@@ -1,10 +1,11 @@
-"""Sea and rain clutter simulation."""
+"""Sea and rain clutter simulation with K-distribution sea clutter."""
 import random
 import math
 from typing import List
 
+
 class SeaClutter:
-    """Simulates sea surface clutter returns."""
+    """Simulates sea surface clutter returns using K-distribution."""
 
     def __init__(self):
         self.sea_state = 3  # 0-9 Douglas sea scale
@@ -19,45 +20,44 @@ class SeaClutter:
         """Set wind direction (and optionally estimate sea state from wind)."""
         self.wind_direction = direction % 360
         if speed_knots is not None:
-            # Rough estimate of sea state from wind speed
             self.sea_state = min(9, int(speed_knots / 5))
 
     def generate_clutter(self, num_range_bins: int, bearing: float,
                         max_range_m: float, suppression: float = 0.0) -> List[float]:
-        """Generate sea clutter for a sweep.
+        """Generate K-distribution sea clutter for a sweep.
 
-        Args:
-            num_range_bins: Number of range bins
-            bearing: Current antenna bearing
-            max_range_m: Maximum range in meters
-            suppression: Clutter suppression level (0-1)
-
-        Returns:
-            Clutter intensity for each range bin
+        K-distribution = gamma(nu) * exponential, where nu (shape) decreases
+        with sea state to produce spikier clutter.
         """
         clutter = []
         bin_size = max_range_m / num_range_bins
 
-        # Sea clutter is strongest at close range and into the wind
+        # K-distribution shape parameter: lower = spikier
+        nu = max(0.5, 10.0 - self.sea_state * 1.2)
+
+        # Wind direction modulation
         wind_factor = 1.0 + 0.3 * math.cos(math.radians(bearing - self.wind_direction))
+
+        # Base clutter power from sea state
+        base = self.base_intensity * (self.sea_state / 5.0)
 
         for i in range(num_range_bins):
             range_m = (i + 0.5) * bin_size
 
-            # Clutter decreases with range (approximately R^-3 for sea clutter)
+            # Range-dependent falloff: R^-2.5 (corrected from R^-1.5)
             if range_m < 100:
                 range_factor = 1.0
             else:
-                range_factor = (100 / range_m) ** 1.5
+                range_factor = (100.0 / range_m) ** 2.5
 
-            # Base clutter from sea state
-            base = self.base_intensity * (self.sea_state / 5.0)
+            # K-distribution sample: gamma(nu, 1/nu) * exponential(1)
+            # Mean of the product = 1.0 (when base=1)
+            gamma_sample = random.gammavariate(nu, 1.0 / nu)
+            exp_sample = random.expovariate(1.0)
+            k_sample = gamma_sample * exp_sample
 
-            # Random variation (Rayleigh distributed for sea clutter)
-            variation = random.expovariate(1.0 / max(0.01, base))
-
-            # Combined clutter
-            clutter_val = min(1.0, variation * range_factor * wind_factor)
+            clutter_val = base * k_sample * range_factor * wind_factor
+            clutter_val = min(1.0, clutter_val)
 
             # Apply suppression
             clutter_val *= (1.0 - suppression)
@@ -80,14 +80,7 @@ class RainClutter:
 
     def add_rain_cell(self, range_m: float, bearing: float,
                      radius_m: float, intensity: float) -> None:
-        """Add a localized rain cell.
-
-        Args:
-            range_m: Range to cell center
-            bearing: Bearing to cell center
-            radius_m: Cell radius
-            intensity: Rain intensity (0-1)
-        """
+        """Add a localized rain cell."""
         self.rain_cells.append((range_m, bearing, radius_m, intensity))
 
     def clear_rain_cells(self) -> None:
@@ -96,46 +89,30 @@ class RainClutter:
 
     def generate_clutter(self, num_range_bins: int, bearing: float,
                         max_range_m: float, suppression: float = 0.0) -> List[float]:
-        """Generate rain clutter for a sweep.
-
-        Args:
-            num_range_bins: Number of range bins
-            bearing: Current antenna bearing
-            max_range_m: Maximum range in meters
-            suppression: Clutter suppression level (0-1)
-
-        Returns:
-            Clutter intensity for each range bin
-        """
+        """Generate rain clutter for a sweep."""
         clutter = [0.0] * num_range_bins
         bin_size = max_range_m / num_range_bins
 
         # Uniform rain
         if self.rain_rate_mmh > 0:
-            # Rain clutter doesn't decrease much with range
             uniform_level = min(0.5, self.rain_rate_mmh / 100.0)
             for i in range(num_range_bins):
                 clutter[i] = uniform_level * random.uniform(0.5, 1.0)
 
         # Rain cells
         for cell_range, cell_bearing, cell_radius, cell_intensity in self.rain_cells:
-            # Check if bearing intersects cell
             bearing_diff = abs((bearing - cell_bearing + 180) % 360 - 180)
-            if bearing_diff > 30:  # Skip if bearing is too far from cell
+            if bearing_diff > 30:
                 continue
 
             for i in range(num_range_bins):
                 range_m = (i + 0.5) * bin_size
 
-                # Calculate distance from range bin to cell center
-                # Simplified: just check range overlap
                 if abs(range_m - cell_range) < cell_radius:
-                    # Bearing component
                     angular_dist = range_m * math.radians(bearing_diff)
                     dist_to_center = math.sqrt((range_m - cell_range)**2 + angular_dist**2)
 
                     if dist_to_center < cell_radius:
-                        # Inside cell
                         edge_factor = 1.0 - (dist_to_center / cell_radius)
                         clutter[i] = max(clutter[i],
                                         cell_intensity * edge_factor * random.uniform(0.7, 1.0))

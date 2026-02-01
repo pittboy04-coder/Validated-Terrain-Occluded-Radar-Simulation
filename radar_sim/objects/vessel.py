@@ -39,39 +39,50 @@ class Vessel:
     height: float = 15.0   # Height above waterline in meters
     rcs: Optional[float] = None  # Radar cross-section in m^2 (None = auto-calculate)
 
+    # Scintillation parameters
+    swerling_type: int = 1  # 1 = buoys/small, 3 = large ships
+    aspect_rcs_variation_db: float = 6.0  # Peak-to-peak aspect RCS variation
+
     # State
     is_active: bool = True
 
     def __post_init__(self):
         if self.rcs is None:
-            # Estimate RCS from physical dimensions
             self.rcs = self._estimate_rcs()
 
     def _estimate_rcs(self) -> float:
         """Estimate radar cross-section from vessel dimensions."""
-        # Simplified RCS estimation based on projected area
-        # Real RCS varies with aspect angle, but this is a reasonable approximation
-        effective_area = self.length * self.height * 0.3  # 30% of broadside area
-        return max(10.0, effective_area)  # Minimum 10 m^2
+        if self.vessel_type == VesselType.BUOY:
+            self.swerling_type = 1
+            self.aspect_rcs_variation_db = 3.0
+            return max(5.0, self.length * self.height * 1.5)
+        elif self.vessel_type == VesselType.SAILING:
+            self.swerling_type = 1
+            self.aspect_rcs_variation_db = 8.0
+            return max(20.0, self.length * self.height * 0.5)
+        elif self.vessel_type in (VesselType.FISHING, VesselType.PILOT):
+            self.swerling_type = 1
+            self.aspect_rcs_variation_db = 6.0
+            return max(30.0, self.length * self.height * 0.4)
+        elif self.vessel_type in (VesselType.CARGO, VesselType.TANKER, VesselType.PASSENGER):
+            self.swerling_type = 3
+            self.aspect_rcs_variation_db = 6.0
+            return max(50.0, self.length * self.height * 0.3)
+        else:
+            self.swerling_type = 1
+            self.aspect_rcs_variation_db = 6.0
+            return max(50.0, self.length * self.height * 0.3)
 
     def update(self, dt: float) -> None:
-        """Update vessel position based on course and speed.
-
-        Args:
-            dt: Time step in seconds
-        """
+        """Update vessel position based on course and speed."""
         if not self.is_active or self.speed == 0:
             return
 
-        # Convert speed from knots to m/s
         speed_ms = self.speed * 0.514444
-
-        # Calculate velocity components
         course_rad = math.radians(self.course)
         vx = speed_ms * math.sin(course_rad)
         vy = speed_ms * math.cos(course_rad)
 
-        # Update position
         self.x += vx * dt
         self.y += vy * dt
 

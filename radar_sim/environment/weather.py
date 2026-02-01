@@ -1,4 +1,5 @@
 """Weather effects for radar simulation."""
+import math
 from dataclasses import dataclass
 from typing import List
 from .noise import NoiseGenerator
@@ -50,17 +51,11 @@ class WeatherEffects:
                       rain_suppression: float = 0.0) -> List[float]:
         """Apply all weather effects to sweep data.
 
-        Args:
-            sweep_data: Original radar returns
-            bearing: Current antenna bearing
-            max_range_m: Maximum range
-            sea_suppression: Sea clutter suppression (0-1)
-            rain_suppression: Rain clutter suppression (0-1)
-
-        Returns:
-            Modified sweep data with weather effects
+        Uses power addition (not max) for physically correct combination,
+        and applies two-way rain attenuation per bin.
         """
         num_bins = len(sweep_data)
+        bin_size = max_range_m / num_bins
 
         # Generate clutter
         sea = self.sea_clutter.generate_clutter(
@@ -70,10 +65,27 @@ class WeatherEffects:
             num_bins, bearing, max_range_m, rain_suppression
         )
 
-        # Combine: targets + clutter + noise
+        # Rain attenuation: Marshall-Palmer at X-band
+        # 0.01 * R^1.21 dB/km (R = rain rate in mm/h)
+        rain_rate = self.conditions.rain_rate_mmh
+        if rain_rate > 0:
+            rain_atten_db_per_km = 0.01 * (rain_rate ** 1.21)
+        else:
+            rain_atten_db_per_km = 0.0
+
+        # Combine: power addition (val + sea + rain), then attenuation + noise
         result = []
-        for i, val in enumerate(sweep_data):
-            combined = max(val, sea[i], rain[i])  # Use max for display
+        for i in range(num_bins):
+            # Power addition instead of max
+            combined = sweep_data[i] + sea[i] + rain[i]
+
+            # Two-way rain attenuation based on range
+            if rain_atten_db_per_km > 0:
+                range_km = ((i + 0.5) * bin_size) / 1000.0
+                atten_db = rain_atten_db_per_km * range_km * 2.0  # two-way
+                atten_linear = 10.0 ** (-atten_db / 10.0)
+                combined *= atten_linear
+
             result.append(combined)
 
         # Add noise
@@ -82,22 +94,11 @@ class WeatherEffects:
         return result
 
     def get_attenuation_factor(self, range_m: float) -> float:
-        """Calculate atmospheric attenuation based on weather.
-
-        Args:
-            range_m: Range in meters
-
-        Returns:
-            Attenuation factor (0-1, 1 = no attenuation)
-        """
-        # Rain attenuation (significant at X-band)
-        rain_atten_db_per_km = 0.01 * self.conditions.rain_rate_mmh
-
-        # Convert range to km
+        """Calculate atmospheric attenuation based on weather."""
+        rain_rate = self.conditions.rain_rate_mmh
+        if rain_rate <= 0:
+            return 1.0
+        rain_atten_db_per_km = 0.01 * (rain_rate ** 1.21)
         range_km = range_m / 1000.0
-
-        # Total attenuation
-        total_atten_db = rain_atten_db_per_km * range_km * 2  # Two-way path
-
-        # Convert to linear
+        total_atten_db = rain_atten_db_per_km * range_km * 2
         return 10 ** (-total_atten_db / 10)

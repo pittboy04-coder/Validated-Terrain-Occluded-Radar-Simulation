@@ -105,6 +105,18 @@ class HeightMap:
             self.config.origin_y + (self.rows - 1) * self.config.cell_size,
         )
 
+    @property
+    def center(self):
+        """Return (center_x, center_y) in world coordinates."""
+        min_x, min_y, max_x, max_y = self.world_extent
+        return ((min_x + max_x) / 2, (min_y + max_y) / 2)
+
+    def move_center(self, new_cx: float, new_cy: float) -> None:
+        """Move the terrain so its center is at (new_cx, new_cy)."""
+        old_cx, old_cy = self.center
+        self.config.origin_x += new_cx - old_cx
+        self.config.origin_y += new_cy - old_cy
+
 
 # ======================================================================
 # Factory helpers

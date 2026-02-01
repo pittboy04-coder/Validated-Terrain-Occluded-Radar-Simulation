@@ -1,121 +1,243 @@
-"""Demo: terrain occlusion in a radar simulation.
-
-Creates an island with elevation between the radar and a target vessel,
-runs a sweep, and verifies that the vessel behind the island is occluded.
-"""
+#!/usr/bin/env python3
+"""Terrain-Occluded Radar PPI Simulator - Interactive GUI."""
+import sys
+import os
+import platform
+import pygame
 from radar_sim.core.simulation import Simulation
-from radar_sim.objects.vessel import Vessel, VesselType
-from radar_sim.environment.terrain import create_island_terrain
-from radar_sim.environment.weather import WeatherConditions
-from radar_sim.core.range_bearing import calculate_bearing
+from radar_sim.visualization.ppi_display import PPIDisplay
+from radar_sim.visualization.scene_view import SceneView
+from radar_sim.ui.control_panel import ControlPanel
+from radar_sim.scenarios.scenario_manager import ScenarioManager
+from radar_sim.scenarios.presets import PRESET_SCENARIOS
+
+WINDOW_WIDTH = 1400
+WINDOW_HEIGHT = 900
+FPS = 60
 
 
 def main():
+    pygame.init()
+    pygame.display.set_caption("Terrain-Occluded Radar PPI Simulator")
+
+    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
+    clock = pygame.time.Clock()
+
+    # Initialize simulation
     sim = Simulation()
 
-    # --- Own ship at origin ------------------------------------------------
-    own_ship = Vessel(
-        id="own_ship", name="Own Ship",
-        vessel_type=VesselType.OWN_SHIP,
-        x=0, y=0, course=0, speed=0,
-        length=100, beam=15, height=20,
-    )
-    sim.world.add_vessel(own_ship)
+    # Set export directory
+    export_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "..", "maritime_radar_sim", "Advanced Simulator CSV Outputs")
+    export_dir = os.path.normpath(export_dir)
+    os.makedirs(export_dir, exist_ok=True)
+    sim.exporter.output_dir = export_dir
+    sim.exporter.mirror_dir = os.path.expanduser(
+        "~/projects/radar-research/Advanced Simulator CSV Outputs")
 
-    # --- Island terrain at 3 km north, 120 m peak -------------------------
-    island = create_island_terrain(
-        center_x=0, center_y=3000,
-        radius=800, peak_height=120,
-        grid_size=64, cell_size=50,
-    )
-    sim.add_terrain(island)
+    # Initialize scenario manager with presets
+    scenario_manager = ScenarioManager()
+    scenario_manager.register_scenarios(PRESET_SCENARIOS)
 
-    # --- Target vessel directly behind the island (5 km north) -------------
-    hidden_vessel = Vessel(
-        id="hidden", name="Hidden Cargo",
-        vessel_type=VesselType.CARGO,
-        x=0, y=5000, course=180, speed=0,
-        length=150, beam=20, height=25,
-    )
-    sim.world.add_vessel(hidden_vessel)
+    # Load the first scenario (Island Occlusion demo)
+    scenario_manager.load_scenario(
+        PRESET_SCENARIOS[0].name,
+        sim.world, sim.radar, sim.weather,
+        simulation=sim)
 
-    # --- Visible vessel off to the side (5 km east) ------------------------
-    visible_vessel = Vessel(
-        id="visible", name="Visible Tanker",
-        vessel_type=VesselType.TANKER,
-        x=5000, y=0, course=270, speed=0,
-        length=200, beam=30, height=20,
-    )
-    sim.world.add_vessel(visible_vessel)
+    # Layout
+    CONTROL_PANEL_WIDTH = 340
+    MIN_PPI_SIZE = 300
 
-    # --- Calm weather (minimal clutter) ------------------------------------
-    sim.weather.set_conditions(WeatherConditions(
-        sea_state=1, wind_speed_knots=5, wind_direction=0,
-        rain_rate_mmh=0, visibility_nm=20,
-    ))
+    def calc_layout(win_w, win_h):
+        available = win_w - CONTROL_PANEL_WIDTH - 30
+        display_size = min(win_h - 40, (available - 20) // 2)
+        display_size = max(MIN_PPI_SIZE, display_size)
+        px = 10
+        py = (win_h - display_size) // 2
+        sx = display_size + 20
+        sy = py
+        cp_x = display_size * 2 + 30
+        cp_w = win_w - cp_x - 10
+        return display_size, px, py, sx, sy, cp_x, cp_w, win_h - 40
 
-    # --- Run one simulation update so sweep buffer is populated ------------
-    sim.radar.params.set_range_scale(6)  # 6 NM
-    sim.update(dt=0.5)
+    display_size, ppi_x, ppi_y, scene_x, scene_y, cp_x, cp_w, cp_h = calc_layout(
+        WINDOW_WIDTH, WINDOW_HEIGHT)
 
-    # --- Check occlusion ---------------------------------------------------
-    bearing_to_hidden = calculate_bearing(0, 0, hidden_vessel.x, hidden_vessel.y)
-    bearing_to_visible = calculate_bearing(0, 0, visible_vessel.x, visible_vessel.y)
+    ppi = PPIDisplay(size=display_size)
+    ppi.initialize()
+    ppi.set_ppi_offset(ppi_x, ppi_y)
 
-    hidden_occluded = sim.occlusion_engine.is_target_occluded(
-        0, 0, hidden_vessel.x, hidden_vessel.y,
-        target_height_m=hidden_vessel.height,
-    )
-    visible_occluded = sim.occlusion_engine.is_target_occluded(
-        0, 0, visible_vessel.x, visible_vessel.y,
-        target_height_m=visible_vessel.height,
-    )
+    scene_view = SceneView(size=display_size)
+    scene_view.set_offset(scene_x, scene_y)
 
-    print("=== Terrain-Occluded Radar Simulation Demo ===\n")
-    print(f"Island terrain: center=(0, 3000), radius=800m, peak=120m")
-    print(f"Antenna height: {sim.radar.params.antenna_height_m} m\n")
+    control_panel = ControlPanel(x=cp_x, y=20, width=cp_w, height=cp_h)
+    control_panel.set_simulation(sim)
+    control_panel.set_scenario_manager(scenario_manager)
+    control_panel.set_scene_view(scene_view)
 
-    print(f"Hidden Cargo  @ bearing {bearing_to_hidden:5.1f} deg, range 5000m")
-    print(f"  Occluded: {hidden_occluded}")
+    range_scales = sim.radar.params.range_scales_nm
+    current_range_idx = (range_scales.index(sim.radar.params.current_range_nm)
+                         if sim.radar.params.current_range_nm in range_scales else 5)
 
-    print(f"Visible Tanker @ bearing {bearing_to_visible:5.1f} deg, range 5000m")
-    print(f"  Occluded: {visible_occluded}")
+    running = True
+    last_bearing = 0.0
+    current_bearing = 0.0
 
-    # --- Sweep data --------------------------------------------------------
-    sweep_hidden = sim.get_radar_sweep_data(bearing_to_hidden)
-    sweep_visible = sim.get_radar_sweep_data(bearing_to_visible)
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
 
-    # Find peak terrain return in the island region (bins ~55-70 for 3km at 6NM)
-    num_bins = len(sweep_hidden)
-    max_range_m = sim.radar.params.max_range_m
-    bin_size = max_range_m / num_bins
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    if scene_view.placement_mode:
+                        scene_view.placement_mode = None
+                    elif scene_view.selected:
+                        scene_view.selected = None
+                    else:
+                        running = False
+                elif event.key == pygame.K_SPACE:
+                    sim.toggle_pause()
+                elif event.key == pygame.K_r:
+                    sim.reset()
+                    sim.setup_default_scenario()
+                elif event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
+                    sim.set_time_scale(sim.time_scale * 1.5)
+                elif event.key == pygame.K_MINUS:
+                    sim.set_time_scale(sim.time_scale / 1.5)
+                elif event.key == pygame.K_F5:
+                    if sim.is_recording():
+                        count = sim.get_record_count()
+                        filepath = sim.stop_recording()
+                        if filepath:
+                            print(f"Recording saved ({count} sweeps): {filepath}")
+                        else:
+                            print(f"Recording stopped but no sweeps captured (count={count})")
+                    else:
+                        session_id = sim.start_recording()
+                        print(f"Recording started: {session_id}")
+                elif event.key == pygame.K_c:
+                    if sim.coastline_enabled:
+                        sim.clear_coastlines()
+                    else:
+                        sim.setup_harbor_coastline()
+                elif event.key == pygame.K_e:
+                    filepath = sim.export_current_sweep(current_bearing)
+                    print(f"Sweep exported to: {filepath}")
+                elif event.key == pygame.K_t:
+                    # Quick-add island terrain ahead of own ship
+                    from radar_sim.environment.terrain import create_island_terrain
+                    own = sim.world.own_ship
+                    cx = own.x if own else 0
+                    cy = (own.y if own else 0) + 3000
+                    hm = create_island_terrain(center_x=cx, center_y=cy,
+                                               radius=800, peak_height=120)
+                    sim.add_terrain(hm)
+                    print("Added island terrain")
+                elif event.key == pygame.K_DELETE:
+                    sim.clear_terrain()
+                    print("Cleared all terrain")
 
-    island_start_bin = int(2200 / bin_size)
-    island_end_bin = min(num_bins, int(3800 / bin_size))
-    terrain_peak = max(sweep_hidden[island_start_bin:island_end_bin])
+            elif event.type == pygame.VIDEORESIZE:
+                win_w, win_h = event.w, event.h
+                if win_w < 100 or win_h < 100:
+                    continue
+                screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
+                display_size, ppi_x, ppi_y, scene_x, scene_y, cp_x, cp_w, cp_h = calc_layout(win_w, win_h)
+                ppi = PPIDisplay(size=display_size)
+                ppi.initialize()
+                ppi.set_ppi_offset(ppi_x, ppi_y)
+                scene_view = SceneView(size=display_size)
+                scene_view.set_offset(scene_x, scene_y)
+                control_panel = ControlPanel(x=cp_x, y=20, width=cp_w, height=cp_h)
+                control_panel.set_simulation(sim)
+                control_panel.set_scenario_manager(scenario_manager)
+                control_panel.set_scene_view(scene_view)
 
-    target_bin = int(5000 / bin_size)
-    target_window = sweep_hidden[max(0, target_bin - 3):min(num_bins, target_bin + 4)]
-    hidden_signal = max(target_window) if target_window else 0.0
+            elif event.type == pygame.MOUSEMOTION:
+                ppi.handle_mouse_motion(event.pos[0], event.pos[1])
 
-    visible_bin = int(5000 / bin_size)
-    visible_window = sweep_visible[max(0, visible_bin - 3):min(num_bins, visible_bin + 4)]
-    visible_signal = max(visible_window) if visible_window else 0.0
+            elif event.type == pygame.MOUSEWHEEL:
+                mouse_pos = pygame.mouse.get_pos()
+                if ppi.screen_to_polar(mouse_pos[0], mouse_pos[1]) is not None:
+                    if event.y > 0 and current_range_idx > 0:
+                        current_range_idx -= 1
+                        sim.radar.set_range_scale(range_scales[current_range_idx])
+                    elif event.y < 0 and current_range_idx < len(range_scales) - 1:
+                        current_range_idx += 1
+                        sim.radar.set_range_scale(range_scales[current_range_idx])
 
-    print(f"\nSweep data (bearing {bearing_to_hidden:.0f} deg):")
-    print(f"  Peak terrain return (island): {terrain_peak:.4f}")
-    print(f"  Signal at hidden target range: {hidden_signal:.4f}")
+            if not scene_view.handle_event(event, sim):
+                control_panel.handle_event(event)
 
-    print(f"\nSweep data (bearing {bearing_to_visible:.0f} deg):")
-    print(f"  Signal at visible target range: {visible_signal:.4f}")
+        # Skip rendering when minimized
+        if pygame.display.get_surface().get_size()[0] == 0:
+            clock.tick(FPS)
+            continue
 
-    # --- Assertions --------------------------------------------------------
-    assert hidden_occluded, "Hidden vessel should be occluded by island"
-    assert not visible_occluded, "Visible vessel should NOT be occluded"
-    assert terrain_peak > 0.01, "Island should produce terrain returns"
+        # CSV playback mode or normal simulation
+        sweep_pairs = None
+        if control_panel.csv_player and control_panel.csv_player.active:
+            sweep_pairs = control_panel.csv_player.get_next_sweeps()
+            for bearing, data in sweep_pairs:
+                ppi.draw_sweep_data(bearing, data)
+        else:
+            sim.update()
+            current_bearing = sim.radar.get_current_bearing()
 
-    print("\nAll checks passed.")
+            if int(current_bearing) != int(last_bearing):
+                sweep_data = sim.get_radar_sweep_data(current_bearing)
+                ppi.draw_sweep_data(current_bearing, sweep_data)
+
+                # Record if active
+                if sim.is_recording():
+                    sim.exporter.add_sweep(
+                        timestamp=sim.world.time,
+                        bearing_deg=current_bearing,
+                        range_scale_nm=sim.radar.params.current_range_nm,
+                        gain=sim.radar.params.gain,
+                        sea_clutter=sim.radar.params.sea_clutter,
+                        rain_clutter=sim.radar.params.rain_clutter,
+                        echo_values=sweep_data)
+
+                if sim.world.own_ship:
+                    ppi.set_heading(sim.world.own_ship.course)
+
+            ppi.set_range(sim.radar.params.current_range_nm)
+            last_bearing = current_bearing
+
+        # Render
+        screen.fill((20, 20, 30))
+
+        # PPI
+        ppi_surface = ppi.render()
+        screen.blit(ppi_surface, (ppi_x, ppi_y))
+
+        # Scene view (with terrain + occlusion visualization)
+        if sweep_pairs is not None:
+            scene_surface = scene_view.render_csv(
+                sweep_pairs, sim.radar.params.current_range_nm)
+        else:
+            scene_surface = scene_view.render(
+                sim.world.own_ship, sim.world.get_all_vessels(),
+                sim.coastlines, sim.radar.params.current_range_nm,
+                terrain_maps=sim.terrain_maps,
+                occlusion_engine=sim.occlusion_engine)
+        screen.blit(scene_surface, (scene_x, scene_y))
+
+        # Cursor info
+        ppi.draw_cursor_info(screen, ppi_x, ppi_y + display_size + 5)
+
+        # Control panel
+        control_panel.draw(screen)
+
+        pygame.display.flip()
+        clock.tick(FPS)
+
+    pygame.quit()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

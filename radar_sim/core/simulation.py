@@ -3,10 +3,12 @@ import time
 from typing import Optional, Callable, List
 from .world import World
 from ..radar.system import RadarSystem
+from ..radar.signal_processing import apply_stc, log_compress, quantize
 from ..environment.weather import WeatherEffects, WeatherConditions
 from ..environment.coastline import Coastline, create_harbor_coastline, create_island_coastline
 from ..environment.terrain import HeightMap
 from ..environment.occlusion import OcclusionEngine
+from ..data_export import RadarDataExporter
 
 class Simulation:
     """Main simulation controller."""
@@ -15,6 +17,7 @@ class Simulation:
         self.world = World()
         self.radar = RadarSystem()
         self.weather = WeatherEffects()
+        self.exporter = RadarDataExporter()
 
         # Coastline/landmass
         self.coastlines: List[Coastline] = []
@@ -33,6 +36,9 @@ class Simulation:
         self.is_running = False
         self.is_paused = False
         self.frame_count = 0
+
+        # Annotation collection (populated each rotation for export)
+        self._current_annotations: List[dict] = []
 
         # Callbacks
         self.on_update: Optional[Callable[[float], None]] = None
@@ -75,6 +81,56 @@ class Simulation:
         self.terrain_maps.clear()
         self.occlusion_engine = None
         self.radar.detection_engine.occlusion_engine = None
+
+    def move_terrain(self, index: int, new_cx: float, new_cy: float) -> None:
+        """Move a terrain map so its center is at (new_cx, new_cy)."""
+        if 0 <= index < len(self.terrain_maps):
+            self.terrain_maps[index].move_center(new_cx, new_cy)
+            self._rebuild_occlusion_engine()
+
+    def remove_terrain(self, index: int) -> None:
+        """Remove a single terrain map by index."""
+        if 0 <= index < len(self.terrain_maps):
+            self.terrain_maps.pop(index)
+            self._rebuild_occlusion_engine()
+
+    def add_vessel_at(self, vessel_type_str: str, x: float, y: float) -> None:
+        """Add a new vessel of the given type at (x, y)."""
+        from ..objects.vessel import Vessel, VesselType
+
+        type_map = {
+            "cargo": (VesselType.CARGO, "Cargo Ship", 150, 20, 25),
+            "tanker": (VesselType.TANKER, "Tanker", 200, 30, 20),
+            "fishing": (VesselType.FISHING, "Fishing Boat", 25, 6, 8),
+            "sailing": (VesselType.SAILING, "Sailing Yacht", 15, 4, 15),
+            "tug": (VesselType.TUG, "Tug", 30, 10, 12),
+            "passenger": (VesselType.PASSENGER, "Ferry", 100, 20, 25),
+            "pilot": (VesselType.PILOT, "Pilot Boat", 15, 5, 6),
+            "buoy": (VesselType.BUOY, "Buoy", 3, 3, 4),
+        }
+
+        vtype, name, length, beam, height = type_map.get(
+            vessel_type_str, (VesselType.CARGO, "Ship", 100, 15, 20))
+
+        # Generate unique id
+        existing_ids = set(self.world.vessels.keys())
+        idx = 1
+        while f"placed_{vessel_type_str}_{idx}" in existing_ids:
+            idx += 1
+        vid = f"placed_{vessel_type_str}_{idx}"
+
+        vessel = Vessel(
+            id=vid, name=f"{name} {idx}",
+            vessel_type=vtype, x=x, y=y,
+            course=0, speed=0,
+            length=length, beam=beam, height=height)
+        self.world.add_vessel(vessel)
+
+    def remove_vessel(self, vessel_id: str) -> None:
+        """Remove a vessel by ID (not own ship)."""
+        vessel = self.world.get_vessel(vessel_id)
+        if vessel and vessel is not self.world.own_ship:
+            self.world.remove_vessel(vessel_id)
 
     def _rebuild_occlusion_engine(self) -> None:
         """(Re)create the OcclusionEngine from current terrain maps."""
@@ -122,6 +178,48 @@ class Simulation:
         ))
 
     # ------------------------------------------------------------------
+    # Annotations
+    # ------------------------------------------------------------------
+    def collect_annotations(self) -> List[dict]:
+        """Collect annotation data for all current targets."""
+        own_ship = self.world.own_ship
+        if own_ship is None:
+            return []
+
+        import math
+        annotations = []
+        for vessel in self.world.get_targets():
+            dx = vessel.x - own_ship.x
+            dy = vessel.y - own_ship.y
+            range_m = math.sqrt(dx * dx + dy * dy)
+            bearing_deg = math.degrees(math.atan2(dx, dy)) % 360
+
+            occluded = False
+            if self.occlusion_engine is not None:
+                occluded = self.occlusion_engine.is_target_occluded(
+                    own_ship.x, own_ship.y, vessel.x, vessel.y,
+                    target_height_m=vessel.height
+                )
+
+            annotations.append({
+                'vessel_id': vessel.id,
+                'vessel_type': vessel.vessel_type.value,
+                'range_m': range_m,
+                'bearing_deg': bearing_deg,
+                'rcs': vessel.rcs,
+                'length': vessel.length,
+                'beam': vessel.beam,
+                'height': vessel.height,
+                'occluded': occluded,
+                'x': vessel.x,
+                'y': vessel.y,
+                'course': vessel.course,
+                'speed': vessel.speed,
+            })
+        self._current_annotations = annotations
+        return annotations
+
+    # ------------------------------------------------------------------
     # Update loop
     # ------------------------------------------------------------------
     def update(self, dt: float = None) -> None:
@@ -142,10 +240,9 @@ class Simulation:
     def get_radar_sweep_data(self, bearing: float) -> list:
         """Get radar sweep data for a bearing, including terrain returns.
 
-        Returns:
-            List of intensities for each range bin.
+        Applies full signal chain: weather → STC → log compression → quantization.
         """
-        # Raw target sweep
+        # Raw target sweep (linear power domain)
         sweep_data = self.radar.get_sweep_at_bearing(bearing)
 
         own_ship = self.world.own_ship
@@ -178,13 +275,23 @@ class Simulation:
             for i, val in enumerate(terrain_returns):
                 sweep_data[i] = max(sweep_data[i], val * self.radar.params.gain)
 
-        # Weather effects
+        # Weather effects (adds clutter + noise in linear power domain)
         sweep_data = self.weather.apply_to_sweep(
             sweep_data, bearing,
             self.radar.params.max_range_m,
             self.radar.params.sea_clutter,
             self.radar.params.rain_clutter
         )
+
+        # STC (near-range attenuation, applied in linear domain)
+        stc_curve = self.radar.params.compute_stc_curve(len(sweep_data))
+        sweep_data = apply_stc(sweep_data, stc_curve, self.radar.params.max_range_m)
+
+        # Log compression (linear → normalized dB domain 0-1)
+        sweep_data = log_compress(sweep_data, self.radar.params.display_log_range_db)
+
+        # Quantization
+        sweep_data = quantize(sweep_data, self.radar.params.output_bits)
 
         return sweep_data
 
@@ -211,3 +318,31 @@ class Simulation:
         self.clear_terrain()
         self.frame_count = 0
         self.is_paused = False
+        self._current_annotations = []
+
+    # ------------------------------------------------------------------
+    # Data export
+    # ------------------------------------------------------------------
+    def start_recording(self) -> str:
+        return self.exporter.start_recording()
+
+    def stop_recording(self) -> str:
+        return self.exporter.stop_recording()
+
+    def is_recording(self) -> bool:
+        return self.exporter.is_recording
+
+    def get_record_count(self) -> int:
+        return self.exporter.get_record_count()
+
+    def export_current_sweep(self, bearing: float) -> str:
+        sweep_data = self.get_radar_sweep_data(bearing)
+        return self.exporter.export_single_sweep(
+            timestamp=self.world.time,
+            bearing_deg=bearing,
+            range_scale_nm=self.radar.params.current_range_nm,
+            gain=self.radar.params.gain,
+            sea_clutter=self.radar.params.sea_clutter,
+            rain_clutter=self.radar.params.rain_clutter,
+            echo_values=sweep_data,
+        )
