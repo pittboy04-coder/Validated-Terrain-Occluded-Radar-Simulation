@@ -104,4 +104,72 @@ def load_radarloc_file(filepath: str) -> RadarLocationData:
         )
         result.vessels.append(vessel)
 
+    # If no terrain but we have coastlines, generate a terrain map from
+    # coastline polygons so land areas occlude targets behind them.
+    if result.terrain is None and result.coastlines:
+        result.terrain = _terrain_from_coastlines(
+            result.coastlines, result.range_nm)
+
     return result
+
+
+def _terrain_from_coastlines(coastlines: list, range_nm: float,
+                             land_height: float = 8.0,
+                             grid_size: int = 128) -> HeightMap:
+    """Generate a terrain height map by rasterizing coastline polygons.
+
+    Any point inside a closed coastline polygon is treated as land and
+    given a default elevation so the occlusion engine blocks radar
+    line-of-sight through it.  Uses scanline rasterization for speed.
+
+    Args:
+        coastlines: List of Coastline objects (closed polygons = land).
+        range_nm: Radar range in nautical miles (defines grid extent).
+        land_height: Default land elevation in meters.
+        grid_size: Grid resolution (rows and cols).
+
+    Returns:
+        HeightMap with land cells elevated, water cells at 0.
+    """
+    range_m = range_nm * 1852.0
+    cell_size = (2 * range_m) / grid_size
+    origin_x = -range_m
+    origin_y = -range_m
+
+    grid = np.zeros((grid_size, grid_size), dtype=np.float32)
+
+    for coastline in coastlines:
+        pts = coastline.points
+        if len(pts) < 3:
+            continue
+        # Scanline fill: for each grid row, find edge crossings
+        for r in range(grid_size):
+            wy = origin_y + (r + 0.5) * cell_size
+            crossings = []
+            n = len(pts)
+            for i in range(n):
+                p1 = pts[i]
+                p2 = pts[(i + 1) % n]
+                # Check if this edge crosses the scanline
+                if (p1.y <= wy < p2.y) or (p2.y <= wy < p1.y):
+                    # X coordinate of intersection
+                    t = (wy - p1.y) / (p2.y - p1.y)
+                    ix = p1.x + t * (p2.x - p1.x)
+                    crossings.append(ix)
+            crossings.sort()
+            # Fill between pairs (even-odd rule)
+            for i in range(0, len(crossings) - 1, 2):
+                x_start = crossings[i]
+                x_end = crossings[i + 1]
+                c_start = max(0, int((x_start - origin_x) / cell_size))
+                c_end = min(grid_size, int((x_end - origin_x) / cell_size) + 1)
+                grid[r, c_start:c_end] = land_height
+
+    if np.any(grid > 0):
+        config = TerrainConfig(
+            origin_x=origin_x,
+            origin_y=origin_y,
+            cell_size=cell_size,
+        )
+        return HeightMap(config, grid)
+    return None
