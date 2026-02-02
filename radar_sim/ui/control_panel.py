@@ -35,7 +35,7 @@ class ControlPanel:
         y_offset = 10
 
         # Scenario panel
-        self.scenario_panel = Panel(10, y_offset, panel_width, 100, "SCENARIO")
+        self.scenario_panel = Panel(10, y_offset, panel_width, 135, "SCENARIO")
         self._scenario_names = ["Default"]
         self.scenario_slider = Slider(
             15, 45, panel_width - 70, 20,
@@ -43,9 +43,13 @@ class ControlPanel:
             label="SCENARIO",
             callback=self._on_scenario_slider)
         self.scenario_name_label = Label(20, 75, "Default", 18)
+        self.load_location_button = Button(
+            15, 100, panel_width - 30, 28, "LOAD LOCATION",
+            callback=self._on_load_location)
         self.scenario_panel.add_widget(self.scenario_slider)
         self.scenario_panel.add_widget(self.scenario_name_label)
-        y_offset += 110
+        self.scenario_panel.add_widget(self.load_location_button)
+        y_offset += 145
 
         # Range control panel
         self.range_panel = Panel(10, y_offset, panel_width, 110, "RANGE")
@@ -292,6 +296,37 @@ class ControlPanel:
             name, self.simulation.world, self.simulation.radar,
             self.simulation.weather, simulation=self.simulation)
         self.pause_button.text = "PAUSE"
+
+    def _on_load_location(self) -> None:
+        """Open file dialog to load a .radarloc location file."""
+        if not self.scenario_manager or not self.simulation:
+            return
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        filepath = filedialog.askopenfilename(
+            title="Select Location File",
+            filetypes=[("Radar Location files", "*.radarloc"), ("All files", "*.*")])
+        root.destroy()
+        if filepath:
+            success = self.scenario_manager.load_location_file(
+                filepath, self.simulation.world, self.simulation.radar,
+                self.simulation.weather, simulation=self.simulation)
+            if success:
+                # Update label with location name
+                from ..scenarios.location_loader import load_radarloc_file
+                try:
+                    loc_data = load_radarloc_file(filepath)
+                    name = loc_data.location_name
+                    if len(name) > 40:
+                        name = name[:37] + "..."
+                    self.scenario_name_label.set_text(name)
+                except Exception:
+                    self.scenario_name_label.set_text("Location loaded")
+            else:
+                self.scenario_name_label.set_text("Load failed")
+            self.pause_button.text = "PAUSE"
 
     def _on_range_input(self, text: str) -> None:
         if self.simulation:

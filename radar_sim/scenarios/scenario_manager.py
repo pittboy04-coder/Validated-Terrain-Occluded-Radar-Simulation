@@ -136,6 +136,70 @@ class ScenarioManager:
             self.on_scenario_loaded(scenario)
         return True
 
+    def load_location_file(self, filepath: str, world: World, radar: RadarSystem,
+                           weather: WeatherEffects, simulation=None) -> bool:
+        """Load a .radarloc location file into the simulation.
+
+        Args:
+            filepath: Path to the .radarloc file.
+            world: World instance to populate.
+            radar: Radar system to configure.
+            weather: Weather effects instance.
+            simulation: Optional Simulation instance for terrain/coastline setup.
+
+        Returns:
+            True on success.
+        """
+        from .location_loader import load_radarloc_file
+
+        try:
+            loc_data = load_radarloc_file(filepath)
+        except Exception as e:
+            print(f"Failed to load location file: {e}")
+            return False
+
+        world.clear()
+        radar.clear_sweep_buffer()
+
+        if simulation is not None:
+            simulation.clear_terrain()
+            simulation.clear_coastlines()
+
+        # Place own ship at origin
+        own_ship = Vessel(
+            id="own_ship", name="Own Ship",
+            vessel_type=VesselType.OWN_SHIP,
+            x=0.0, y=0.0, course=0.0, speed=0.0)
+        world.add_vessel(own_ship)
+
+        # Add preset vessels from file
+        for vessel in loc_data.vessels:
+            world.add_vessel(vessel)
+
+        # Set radar range
+        radar.set_range_scale(loc_data.range_nm)
+
+        if simulation is not None:
+            # Load coastlines
+            for coastline in loc_data.coastlines:
+                simulation.add_coastline(coastline)
+
+            # Load terrain
+            if loc_data.terrain is not None:
+                simulation.add_terrain(loc_data.terrain)
+
+        self.current_scenario = f"LOC:{loc_data.location_name}"
+        if self.on_scenario_loaded:
+            # Create a minimal Scenario object for the callback
+            scenario = Scenario(
+                name=self.current_scenario,
+                description=f"Loaded from {filepath}",
+                vessels=[],
+                radar_range_nm=loc_data.range_nm,
+            )
+            self.on_scenario_loaded(scenario)
+        return True
+
     def get_current_scenario(self) -> Optional[Scenario]:
         if self.current_scenario:
             return self.scenarios.get(self.current_scenario)
