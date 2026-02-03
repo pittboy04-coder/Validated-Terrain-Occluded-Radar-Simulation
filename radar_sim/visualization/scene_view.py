@@ -316,15 +316,19 @@ class SceneView:
                 vx, vy = self._world_to_screen(vessel.x, vessel.y, own_x, own_y, zoom)
 
                 color = COLORS['vessel']
+                is_occluded = False
                 if occlusion_engine is not None:
                     if occlusion_engine.is_target_occluded(
                         own_x, own_y, vessel.x, vessel.y,
                         target_height_m=vessel.height
                     ):
                         color = COLORS['occluded']
+                        is_occluded = True
 
-                self._draw_vessel_marker(vx, vy, vessel.course, color,
-                                          getattr(vessel, 'name', ''))
+                vessel_name = getattr(vessel, 'name', '')
+                if is_occluded:
+                    vessel_name = f"{vessel_name} [OCCLUDED]" if vessel_name else "[OCCLUDED]"
+                self._draw_vessel_marker(vx, vy, vessel.course, color, vessel_name)
 
                 # Selection highlight for vessels
                 if self.selected == ("vessel", vessel.id):

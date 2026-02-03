@@ -161,12 +161,12 @@ def _terrain_from_coastlines(coastlines: list, range_nm: float,
                              grid_size: int = 128) -> HeightMap:
     """Generate a terrain height map by rasterizing coastline polygons.
 
-    Any point inside a closed coastline polygon is treated as land and
-    given a default elevation so the occlusion engine blocks radar
-    line-of-sight through it.  Uses scanline rasterization for speed.
+    Water features (lakes, rivers, ocean) are defined by polygons that
+    enclose WATER, not land. So we start with the entire grid as land,
+    then carve out water areas where the polygons are.
 
     Args:
-        coastlines: List of Coastline objects (closed polygons = land).
+        coastlines: List of Coastline objects (polygons enclosing water).
         range_nm: Radar range in nautical miles (defines grid extent).
         land_height: Default land elevation in meters.
         grid_size: Grid resolution (rows and cols).
@@ -179,8 +179,10 @@ def _terrain_from_coastlines(coastlines: list, range_nm: float,
     origin_x = -range_m
     origin_y = -range_m
 
-    grid = np.zeros((grid_size, grid_size), dtype=np.float32)
+    # Start with all land
+    grid = np.full((grid_size, grid_size), land_height, dtype=np.float32)
 
+    # Carve out water areas (inside polygons = water = 0)
     for coastline in coastlines:
         pts = coastline.points
         if len(pts) < 3:
@@ -200,15 +202,16 @@ def _terrain_from_coastlines(coastlines: list, range_nm: float,
                     ix = p1.x + t * (p2.x - p1.x)
                     crossings.append(ix)
             crossings.sort()
-            # Fill between pairs (even-odd rule)
+            # Fill between pairs (even-odd rule) with WATER (0)
             for i in range(0, len(crossings) - 1, 2):
                 x_start = crossings[i]
                 x_end = crossings[i + 1]
                 c_start = max(0, int((x_start - origin_x) / cell_size))
                 c_end = min(grid_size, int((x_end - origin_x) / cell_size) + 1)
-                grid[r, c_start:c_end] = land_height
+                grid[r, c_start:c_end] = 0.0
 
-    if np.any(grid > 0):
+    # Only return if there's actually some water carved out
+    if np.any(grid == 0):
         config = TerrainConfig(
             origin_x=origin_x,
             origin_y=origin_y,
