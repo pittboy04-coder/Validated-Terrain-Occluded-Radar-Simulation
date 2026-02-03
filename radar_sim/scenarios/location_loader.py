@@ -165,21 +165,81 @@ def _merge_terrain(explicit: HeightMap, coastline: HeightMap) -> HeightMap:
     return HeightMap(explicit.config, merged.astype(np.float32))
 
 
+def _polygon_area(points) -> float:
+    """Calculate signed area of a polygon using the shoelace formula."""
+    n = len(points)
+    if n < 3:
+        return 0.0
+    area = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        area += points[i].x * points[j].y
+        area -= points[j].x * points[i].y
+    return abs(area) / 2.0
+
+
+def _point_in_polygon(px: float, py: float, points: list) -> bool:
+    """Ray casting algorithm to test if point is inside polygon."""
+    n = len(points)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = points[i].x, points[i].y
+        xj, yj = points[j].x, points[j].y
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _scanline_fill_polygon(grid: np.ndarray, points: list,
+                           origin_x: float, origin_y: float,
+                           cell_size: float, fill_value: float) -> None:
+    """Fill a single polygon into the grid using scanline algorithm."""
+    grid_size = grid.shape[0]
+    n = len(points)
+    if n < 3:
+        return
+
+    for r in range(grid_size):
+        wy = origin_y + (r + 0.5) * cell_size
+        crossings = []
+
+        for i in range(n):
+            p1 = points[i]
+            p2 = points[(i + 1) % n]
+            y1, y2 = p1.y, p2.y
+            x1, x2 = p1.x, p2.x
+
+            if (y1 <= wy < y2) or (y2 <= wy < y1):
+                if abs(y2 - y1) > 1e-10:
+                    t = (wy - y1) / (y2 - y1)
+                    ix = x1 + t * (x2 - x1)
+                    crossings.append(ix)
+
+        if len(crossings) >= 2:
+            crossings.sort()
+            for i in range(0, len(crossings) - 1, 2):
+                x_start = crossings[i]
+                x_end = crossings[i + 1]
+                c_start = max(0, int((x_start - origin_x) / cell_size))
+                c_end = min(grid_size, int((x_end - origin_x) / cell_size) + 1)
+                grid[r, c_start:c_end] = fill_value
+
+
 def _terrain_from_coastlines(coastlines: list, range_nm: float,
                              land_height: float = 13.0,
                              grid_size: int = 128,
                              closed_indices: set = None) -> HeightMap:
     """Generate a terrain height map by rasterizing coastline polygons.
 
-    Water features (lakes, rivers, ocean) are defined by polygons that
-    enclose WATER, not land. So we start with the entire grid as land,
-    then carve out water areas where the CLOSED polygons are.
+    For water bodies (lakes, bays, etc), the radar is typically ON the water,
+    so we mark areas INSIDE closed polygons as water.
 
-    Unclosed polygons (shoreline segments) are skipped for fill operations
-    as they would produce incorrect results.
+    Uses point-in-polygon testing to avoid scanline banding artifacts.
 
     Args:
-        coastlines: List of Coastline objects (polygons enclosing water).
+        coastlines: List of Coastline objects.
         range_nm: Radar range in nautical miles (defines grid extent).
         land_height: Default land elevation in meters.
         grid_size: Grid resolution (rows and cols).
@@ -197,42 +257,41 @@ def _terrain_from_coastlines(coastlines: list, range_nm: float,
     grid = np.full((grid_size, grid_size), land_height, dtype=np.float32)
 
     if closed_indices is None:
-        closed_indices = set(range(len(coastlines)))  # Assume all closed
+        closed_indices = set(range(len(coastlines)))
 
-    # Carve out water areas (inside CLOSED polygons = water = 0)
+    # Collect all closed polygons with bounding boxes for fast rejection
+    closed_polygons = []
     for idx, coastline in enumerate(coastlines):
-        # Only process closed polygons for terrain fill
         if idx not in closed_indices:
             continue
-
         pts = coastline.points
-        if len(pts) < 3:
-            continue
+        if len(pts) >= 3:
+            xs = [p.x for p in pts]
+            ys = [p.y for p in pts]
+            bbox = (min(xs), max(xs), min(ys), max(ys))  # minx, maxx, miny, maxy
+            closed_polygons.append((pts, bbox))
 
-        # Scanline fill: for each grid row, find edge crossings
-        for r in range(grid_size):
-            wy = origin_y + (r + 0.5) * cell_size
-            crossings = []
-            n = len(pts)
-            for i in range(n):
-                p1 = pts[i]
-                p2 = pts[(i + 1) % n]
-                # Check if this edge crosses the scanline
-                if (p1.y <= wy < p2.y) or (p2.y <= wy < p1.y):
-                    # X coordinate of intersection
-                    t = (wy - p1.y) / (p2.y - p1.y)
-                    ix = p1.x + t * (p2.x - p1.x)
-                    crossings.append(ix)
-            crossings.sort()
-            # Fill between pairs (even-odd rule) with WATER (0)
-            for i in range(0, len(crossings) - 1, 2):
-                x_start = crossings[i]
-                x_end = crossings[i + 1]
-                c_start = max(0, int((x_start - origin_x) / cell_size))
-                c_end = min(grid_size, int((x_end - origin_x) / cell_size) + 1)
-                grid[r, c_start:c_end] = 0.0
+    if not closed_polygons:
+        return None
 
-    # Only return if there's actually some water carved out
+    # Sort by bounding box area descending (test larger polygons first)
+    closed_polygons.sort(key=lambda x: (x[1][1]-x[1][0])*(x[1][3]-x[1][2]), reverse=True)
+
+    # For each grid cell, test if it's inside ANY closed polygon (= water)
+    for r in range(grid_size):
+        wy = origin_y + (r + 0.5) * cell_size
+        for c in range(grid_size):
+            wx = origin_x + (c + 0.5) * cell_size
+            # If inside ANY closed polygon, mark as water
+            for pts, bbox in closed_polygons:
+                # Quick bounding box rejection
+                if wx < bbox[0] or wx > bbox[1] or wy < bbox[2] or wy > bbox[3]:
+                    continue
+                if _point_in_polygon(wx, wy, pts):
+                    grid[r, c] = 0.0
+                    break
+
+    # Only return if there's actually some water
     if np.any(grid == 0):
         config = TerrainConfig(
             origin_x=origin_x,
