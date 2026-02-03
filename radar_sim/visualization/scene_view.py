@@ -98,6 +98,16 @@ class SceneView:
         lx, ly = self._global_to_local(gx, gy)
         return 0 <= lx < self.size and 0 <= ly < self.size
 
+    def _is_on_land(self, wx: float, wy: float, simulation) -> bool:
+        """Check if world coordinates are on land (elevation > 0)."""
+        if simulation is None or not simulation.terrain_maps:
+            return False
+        for hm in simulation.terrain_maps:
+            elev = hm.get_elevation(wx, wy)
+            if elev > 0.5:  # Land threshold
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # Hit testing
     # ------------------------------------------------------------------
@@ -149,10 +159,11 @@ class SceneView:
 
             lx, ly = self._global_to_local(event.pos[0], event.pos[1])
 
-            # Placement mode: place a new vessel
+            # Placement mode: place a new vessel (only on water, not land)
             if self.placement_mode is not None:
                 wx, wy = self._screen_to_world(lx, ly)
-                simulation.add_vessel_at(self.placement_mode, wx, wy)
+                if not self._is_on_land(wx, wy, simulation):
+                    simulation.add_vessel_at(self.placement_mode, wx, wy)
                 # Stay in placement mode so user can place multiple
                 return True
 
@@ -197,8 +208,10 @@ class SceneView:
                 if self.selected[0] == "vessel":
                     vessel = simulation.world.get_vessel(self.selected[1])
                     if vessel:
-                        vessel.x = new_x
-                        vessel.y = new_y
+                        # Only move vessel if destination is water (not land)
+                        if not self._is_on_land(new_x, new_y, simulation):
+                            vessel.x = new_x
+                            vessel.y = new_y
                 elif self.selected[0] == "terrain":
                     simulation.move_terrain(self.selected[1], new_x, new_y)
                 return True
