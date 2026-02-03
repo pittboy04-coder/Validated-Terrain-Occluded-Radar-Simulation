@@ -240,25 +240,30 @@ class SceneView:
             origin_y = hm.config.origin_y
 
             # Compute distance from land for water depth shading
-            # Use a simple approach: for each water cell, estimate depth by
-            # counting nearby land cells (more land nearby = shallower)
             land_mask = grid > 0.5
+            water_mask = ~land_mask
 
-            # Create depth map for water (distance transform approximation)
-            # We'll use a simple kernel-based approach for speed
+            # Create depth map for water
             depth_map = np.zeros_like(grid, dtype=np.float32)
-            if np.any(~land_mask):
-                # Simple depth: count land cells in surrounding area
-                from scipy.ndimage import distance_transform_edt
+            if np.any(water_mask):
                 try:
+                    from scipy.ndimage import distance_transform_edt
                     # Distance from each water cell to nearest land
-                    dist_to_land = distance_transform_edt(~land_mask)
+                    dist_to_land = distance_transform_edt(water_mask)
                     # Normalize: 0 = at shore, 1 = far from shore
                     max_dist = max(1, dist_to_land.max())
                     depth_map = np.clip(dist_to_land / max_dist, 0, 1)
                 except ImportError:
-                    # Fallback without scipy: uniform depth
-                    depth_map[~land_mask] = 0.5
+                    # Fallback without scipy: simple radial depth from center
+                    center_r, center_c = rows // 2, cols // 2
+                    for r in range(rows):
+                        for c in range(cols):
+                            if water_mask[r, c]:
+                                # Distance from center normalized
+                                dist = math.sqrt((r - center_r)**2 + (c - center_c)**2)
+                                max_possible = math.sqrt(center_r**2 + center_c**2)
+                                depth_map[r, c] = 1.0 - (dist / max_possible)
+                    depth_map = np.clip(depth_map, 0, 1)
 
             # Render each cell
             pixel_size = max(2, int(cell * zoom))
