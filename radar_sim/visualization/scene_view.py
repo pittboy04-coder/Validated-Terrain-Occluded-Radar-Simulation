@@ -7,21 +7,22 @@ from typing import List, Tuple, Optional
 NM_TO_M = 1852.0
 
 COLORS = {
-    'water': (20, 40, 80),
-    'land': (120, 100, 60),
+    'water_shallow': (70, 130, 180),   # Light steel blue - shallow water
+    'water_deep': (15, 35, 75),        # Dark navy - deep water
+    'land': (139, 119, 85),            # Tan/brown for land
+    'land_high': (160, 140, 100),      # Lighter tan for higher elevation
     'own_ship': (255, 255, 0),
     'vessel': (255, 100, 100),
     'vessel_label': (255, 180, 180),
-    'range_ring': (60, 80, 120),
+    'range_ring': (100, 120, 150),
     'grid': (40, 60, 100),
     'north_arrow': (255, 255, 255),
     'echo': (0, 200, 0),
     'title': (180, 200, 220),
-    'terrain_low': (60, 80, 40),
-    'terrain_high': (180, 160, 100),
-    'occluded': (80, 20, 20),
+    'occluded': (100, 60, 60),
     'selected': (255, 255, 0),
     'placement': (0, 255, 255),
+    'coastline': (90, 75, 55),         # Darker outline for coastline edge
 }
 
 # Hit-test radius in pixels
@@ -221,32 +222,78 @@ class SceneView:
 
     def _render_terrain_layer(self, terrain_maps, own_x: float, own_y: float,
                                zoom: float) -> pygame.Surface:
-        surf = pygame.Surface((self.size, self.size), pygame.SRCALPHA)
-        surf.fill((0, 0, 0, 0))
+        """Render terrain with land (tan) and water (blue with depth shading)."""
+        surf = pygame.Surface((self.size, self.size))
+        # Start with medium blue water
+        surf.fill(COLORS['water_shallow'])
+
+        if not terrain_maps:
+            return surf
+
+        import numpy as np
 
         for hm in terrain_maps:
-            min_x, min_y, max_x, max_y = hm.world_extent
+            grid = hm.grid
+            rows, cols = grid.shape
             cell = hm.config.cell_size
+            origin_x = hm.config.origin_x
+            origin_y = hm.config.origin_y
 
-            wy = min_y
-            while wy <= max_y:
-                wx = min_x
-                while wx <= max_x:
-                    elev = hm.get_elevation(wx, wy)
+            # Compute distance from land for water depth shading
+            # Use a simple approach: for each water cell, estimate depth by
+            # counting nearby land cells (more land nearby = shallower)
+            land_mask = grid > 0.5
+
+            # Create depth map for water (distance transform approximation)
+            # We'll use a simple kernel-based approach for speed
+            depth_map = np.zeros_like(grid, dtype=np.float32)
+            if np.any(~land_mask):
+                # Simple depth: count land cells in surrounding area
+                from scipy.ndimage import distance_transform_edt
+                try:
+                    # Distance from each water cell to nearest land
+                    dist_to_land = distance_transform_edt(~land_mask)
+                    # Normalize: 0 = at shore, 1 = far from shore
+                    max_dist = max(1, dist_to_land.max())
+                    depth_map = np.clip(dist_to_land / max_dist, 0, 1)
+                except ImportError:
+                    # Fallback without scipy: uniform depth
+                    depth_map[~land_mask] = 0.5
+
+            # Render each cell
+            pixel_size = max(2, int(cell * zoom))
+
+            for r in range(rows):
+                wy = origin_y + (r + 0.5) * cell
+                for c in range(cols):
+                    wx = origin_x + (c + 0.5) * cell
+                    sx, sy = self._world_to_screen(wx, wy, own_x, own_y, zoom)
+
+                    if not (0 <= sx < self.size and 0 <= sy < self.size):
+                        continue
+
+                    elev = grid[r, c]
+
                     if elev > 0.5:
-                        sx, sy = self._world_to_screen(wx, wy, own_x, own_y, zoom)
-                        if 0 <= sx < self.size and 0 <= sy < self.size:
-                            t = min(1.0, elev / 150.0)
-                            r = int(COLORS['terrain_low'][0] + t * (COLORS['terrain_high'][0] - COLORS['terrain_low'][0]))
-                            g = int(COLORS['terrain_low'][1] + t * (COLORS['terrain_high'][1] - COLORS['terrain_low'][1]))
-                            b = int(COLORS['terrain_low'][2] + t * (COLORS['terrain_high'][2] - COLORS['terrain_low'][2]))
-                            alpha = int(120 + 100 * t)
-                            pixel_size = max(2, int(cell * zoom))
-                            pygame.draw.rect(surf, (r, g, b, alpha),
-                                             (sx - pixel_size // 2, sy - pixel_size // 2,
-                                              pixel_size, pixel_size))
-                    wx += cell
-                wy += cell
+                        # Land - tan color, slightly lighter for higher elevation
+                        t = min(1.0, elev / 50.0)
+                        color = (
+                            int(COLORS['land'][0] + t * (COLORS['land_high'][0] - COLORS['land'][0])),
+                            int(COLORS['land'][1] + t * (COLORS['land_high'][1] - COLORS['land'][1])),
+                            int(COLORS['land'][2] + t * (COLORS['land_high'][2] - COLORS['land'][2])),
+                        )
+                    else:
+                        # Water - blue, darker for deeper water
+                        depth = depth_map[r, c]
+                        color = (
+                            int(COLORS['water_shallow'][0] + depth * (COLORS['water_deep'][0] - COLORS['water_shallow'][0])),
+                            int(COLORS['water_shallow'][1] + depth * (COLORS['water_deep'][1] - COLORS['water_shallow'][1])),
+                            int(COLORS['water_shallow'][2] + depth * (COLORS['water_deep'][2] - COLORS['water_shallow'][2])),
+                        )
+
+                    pygame.draw.rect(surf, color,
+                                     (sx - pixel_size // 2, sy - pixel_size // 2,
+                                      pixel_size, pixel_size))
 
         return surf
 
@@ -264,7 +311,7 @@ class SceneView:
         # Diamond handle
         hs = 6
         pts = [(sx, sy - hs), (sx + hs, sy), (sx, sy + hs), (sx - hs, sy)]
-        pygame.draw.polygon(self.surface, COLORS['terrain_high'], pts)
+        pygame.draw.polygon(self.surface, COLORS['land_high'], pts)
         pygame.draw.polygon(self.surface, (255, 255, 255), pts, 1)
 
         # Selection highlight
@@ -273,8 +320,6 @@ class SceneView:
 
     def render(self, own_ship, vessels, coastlines, range_nm: float,
                terrain_maps=None, occlusion_engine=None) -> pygame.Surface:
-        self.surface.fill(COLORS['water'])
-
         max_range_m = range_nm * NM_TO_M
         zoom = self.radius / max_range_m if max_range_m > 0 else 1.0
 
@@ -287,8 +332,16 @@ class SceneView:
         self._zoom = zoom
         self._max_range_m = max_range_m
 
-        # Coastlines - draw as outlines only (polygons define water boundaries)
-        # The terrain grid (green) shows actual land for occlusion
+        # Render terrain layer (land=tan, water=blue with depth shading)
+        # This is the single source of truth for land/water visualization
+        if terrain_maps:
+            terrain_surf = self._render_terrain_layer(terrain_maps, own_x, own_y, zoom)
+            self.surface.blit(terrain_surf, (0, 0))
+        else:
+            # No terrain - fill with water color
+            self.surface.fill(COLORS['water_shallow'])
+
+        # Draw coastline edges on top for definition (thin dark line)
         if coastlines:
             for coastline in coastlines:
                 if len(coastline.points) >= 3:
@@ -297,13 +350,7 @@ class SceneView:
                         sx, sy = self._world_to_screen(p.x, p.y, own_x, own_y, zoom)
                         screen_pts.append((sx, sy))
                     if any(0 <= x < self.size and 0 <= y < self.size for x, y in screen_pts):
-                        # Draw as outline, not filled - these are water boundaries
-                        pygame.draw.polygon(self.surface, COLORS['land'], screen_pts, 1)
-
-        # Terrain
-        if terrain_maps:
-            terrain_surf = self._render_terrain_layer(terrain_maps, own_x, own_y, zoom)
-            self.surface.blit(terrain_surf, (0, 0))
+                        pygame.draw.lines(self.surface, COLORS['coastline'], False, screen_pts, 1)
 
         self._draw_range_rings(range_nm, max_range_m)
 
