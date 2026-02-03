@@ -229,14 +229,18 @@ def _scanline_fill_polygon(grid: np.ndarray, points: list,
 
 def _terrain_from_coastlines(coastlines: list, range_nm: float,
                              land_height: float = 13.0,
-                             grid_size: int = 128,
+                             grid_size: int = 192,  # Balance of accuracy vs speed
                              closed_indices: set = None) -> HeightMap:
     """Generate a terrain height map by rasterizing coastline polygons.
 
-    For water bodies (lakes, bays, etc), the radar is typically ON the water,
-    so we mark areas INSIDE closed polygons as water.
+    Handles two cases:
+    1. Lakes/reservoirs: Many closed polygons that ENCLOSE water
+       → Start with land, fill polygons as water
+    2. Ocean coastlines: Mostly open ways marking shore boundary
+       → Start with water at center, flood-fill land from coastlines
 
-    Uses point-in-polygon testing to avoid scanline banding artifacts.
+    Detection: If closed polygons cover significant area, use lake mode.
+    Otherwise, use ocean coastline mode with flood-fill.
 
     Args:
         coastlines: List of Coastline objects.
@@ -248,19 +252,19 @@ def _terrain_from_coastlines(coastlines: list, range_nm: float,
     Returns:
         HeightMap with land cells elevated, water cells at 0.
     """
+    from collections import deque
+
     range_m = range_nm * 1852.0
     cell_size = (2 * range_m) / grid_size
     origin_x = -range_m
     origin_y = -range_m
 
-    # Start with all land
-    grid = np.full((grid_size, grid_size), land_height, dtype=np.float32)
-
     if closed_indices is None:
         closed_indices = set(range(len(coastlines)))
 
-    # Collect all closed polygons with bounding boxes for fast rejection
+    # Collect closed polygons with bounding boxes
     closed_polygons = []
+    total_closed_area = 0.0
     for idx, coastline in enumerate(coastlines):
         if idx not in closed_indices:
             continue
@@ -268,31 +272,99 @@ def _terrain_from_coastlines(coastlines: list, range_nm: float,
         if len(pts) >= 3:
             xs = [p.x for p in pts]
             ys = [p.y for p in pts]
-            bbox = (min(xs), max(xs), min(ys), max(ys))  # minx, maxx, miny, maxy
-            closed_polygons.append((pts, bbox))
+            bbox = (min(xs), max(xs), min(ys), max(ys))
+            # Calculate polygon area
+            area = _polygon_area(pts)
+            total_closed_area += area
+            closed_polygons.append((pts, bbox, area))
 
-    if not closed_polygons:
-        return None
+    # Calculate total grid area
+    grid_area = (2 * range_m) ** 2
 
-    # Sort by bounding box area descending (test larger polygons first)
-    closed_polygons.sort(key=lambda x: (x[1][1]-x[1][0])*(x[1][3]-x[1][2]), reverse=True)
+    # Decide mode: if closed polygons cover >5% of grid, use lake mode
+    # Otherwise, use ocean coastline mode
+    use_lake_mode = total_closed_area > grid_area * 0.05 and closed_polygons
 
-    # For each grid cell, test if it's inside ANY closed polygon (= water)
-    for r in range(grid_size):
-        wy = origin_y + (r + 0.5) * cell_size
-        for c in range(grid_size):
-            wx = origin_x + (c + 0.5) * cell_size
-            # If inside ANY closed polygon, mark as water
-            for pts, bbox in closed_polygons:
-                # Quick bounding box rejection
-                if wx < bbox[0] or wx > bbox[1] or wy < bbox[2] or wy > bbox[3]:
-                    continue
-                if _point_in_polygon(wx, wy, pts):
-                    grid[r, c] = 0.0
-                    break
+    if use_lake_mode:
+        # LAKE MODE: Closed polygons enclose water
+        grid = np.full((grid_size, grid_size), land_height, dtype=np.float32)
 
-    # Only return if there's actually some water
-    if np.any(grid == 0):
+        # Sort by area descending
+        closed_polygons.sort(key=lambda x: x[2], reverse=True)
+
+        # Fill closed polygons as water
+        for r in range(grid_size):
+            wy = origin_y + (r + 0.5) * cell_size
+            for c in range(grid_size):
+                wx = origin_x + (c + 0.5) * cell_size
+                for pts, bbox, _ in closed_polygons:
+                    if wx < bbox[0] or wx > bbox[1] or wy < bbox[2] or wy > bbox[3]:
+                        continue
+                    if _point_in_polygon(wx, wy, pts):
+                        grid[r, c] = 0.0
+                        break
+    else:
+        # OCEAN COASTLINE MODE: Water at center, land along coastlines
+        # Start with water, then flood-fill land from coastline edges
+        grid = np.zeros((grid_size, grid_size), dtype=np.float32)
+
+        # Draw all coastline segments as barriers
+        def world_to_grid(wx, wy):
+            c = int((wx - origin_x) / cell_size)
+            r = int((wy - origin_y) / cell_size)
+            return max(0, min(grid_size-1, r)), max(0, min(grid_size-1, c))
+
+        barrier = np.zeros((grid_size, grid_size), dtype=np.uint8)
+
+        for coastline in coastlines:
+            pts = coastline.points
+            if len(pts) < 2:
+                continue
+            for i in range(len(pts) - 1):
+                r1, c1 = world_to_grid(pts[i].x, pts[i].y)
+                r2, c2 = world_to_grid(pts[i+1].x, pts[i+1].y)
+                # Bresenham line
+                dr, dc = abs(r2-r1), abs(c2-c1)
+                sr, sc = (1 if r1 < r2 else -1), (1 if c1 < c2 else -1)
+                err = dr - dc
+                while True:
+                    barrier[r1, c1] = 1
+                    grid[r1, c1] = land_height  # Coastline itself is land
+                    if r1 == r2 and c1 == c2:
+                        break
+                    e2 = 2 * err
+                    if e2 > -dc:
+                        err -= dc
+                        r1 += sr
+                    if e2 < dr:
+                        err += dr
+                        c1 += sc
+
+        # Flood-fill land from grid edges (outside = land)
+        visited = np.zeros((grid_size, grid_size), dtype=np.uint8)
+        queue = deque()
+
+        for i in range(grid_size):
+            for r, c in [(0, i), (grid_size-1, i), (i, 0), (i, grid_size-1)]:
+                if barrier[r, c] == 0 and visited[r, c] == 0:
+                    queue.append((r, c))
+                    visited[r, c] = 1
+                    grid[r, c] = land_height
+
+        while queue:
+            r, c = queue.popleft()
+            for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < grid_size and 0 <= nc < grid_size:
+                    if visited[nr, nc] == 0 and barrier[nr, nc] == 0:
+                        visited[nr, nc] = 1
+                        grid[nr, nc] = land_height
+                        queue.append((nr, nc))
+
+    # Return terrain if there's both land and water
+    has_land = np.any(grid > 0)
+    has_water = np.any(grid == 0)
+    if has_land and has_water:
         config = TerrainConfig(
             origin_x=origin_x,
             origin_y=origin_y,
