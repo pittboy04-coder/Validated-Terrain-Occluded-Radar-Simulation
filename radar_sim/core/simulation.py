@@ -242,15 +242,19 @@ class Simulation:
 
         Applies full signal chain: weather → STC → log compression → quantization.
         """
-        # Raw target sweep (linear power domain)
-        sweep_data = self.radar.get_sweep_at_bearing(bearing)
-
         own_ship = self.world.own_ship
         if own_ship is None:
-            return sweep_data
+            return [0.0] * self.radar.num_range_bins
 
+        # Generate fresh target sweep data for this bearing
+        targets = self.world.get_targets()
         own_x = own_ship.x
         own_y = own_ship.y
+
+        sweep_data = self.radar.detection_engine.generate_sweep_data(
+            targets, own_x, own_y, self.world.time,
+            self.radar.num_range_bins
+        )
 
         # Coastline returns
         if self.coastline_enabled:

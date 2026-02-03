@@ -287,7 +287,8 @@ class SceneView:
         self._zoom = zoom
         self._max_range_m = max_range_m
 
-        # Coastlines
+        # Coastlines - draw as outlines only (polygons define water boundaries)
+        # The terrain grid (green) shows actual land for occlusion
         if coastlines:
             for coastline in coastlines:
                 if len(coastline.points) >= 3:
@@ -296,7 +297,8 @@ class SceneView:
                         sx, sy = self._world_to_screen(p.x, p.y, own_x, own_y, zoom)
                         screen_pts.append((sx, sy))
                     if any(0 <= x < self.size and 0 <= y < self.size for x, y in screen_pts):
-                        pygame.draw.polygon(self.surface, COLORS['land'], screen_pts)
+                        # Draw as outline, not filled - these are water boundaries
+                        pygame.draw.polygon(self.surface, COLORS['land'], screen_pts, 1)
 
         # Terrain
         if terrain_maps:
