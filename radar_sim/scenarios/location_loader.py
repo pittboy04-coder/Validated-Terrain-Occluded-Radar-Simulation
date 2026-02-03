@@ -18,6 +18,7 @@ class RadarLocationData:
     coastlines: list = field(default_factory=list)
     terrain: Optional[HeightMap] = None
     vessels: list = field(default_factory=list)
+    _closed_indices: set = field(default_factory=set)  # Indices of closed polygons
 
 
 def load_radarloc_file(filepath: str) -> RadarLocationData:
@@ -50,8 +51,9 @@ def load_radarloc_file(filepath: str) -> RadarLocationData:
     result.center_lon = meta.get("center_lon", 0.0)
     result.range_nm = meta.get("range_nm", 6.0)
 
-    # Coastlines
-    for coast_data in doc.get("coastlines", []):
+    # Coastlines - track which ones are closed for terrain generation
+    closed_indices = set()
+    for idx, coast_data in enumerate(doc.get("coastlines", [])):
         points = coast_data.get("points", [])
         if len(points) < 3:
             continue
@@ -59,12 +61,17 @@ def load_radarloc_file(filepath: str) -> RadarLocationData:
         for pt in points:
             coastline.add_point(pt["x"], pt["y"])
         # Close polygon if flagged
-        if coast_data.get("closed", False) and len(points) >= 3:
+        is_closed = coast_data.get("closed", False)
+        if is_closed and len(points) >= 3:
             first = points[0]
             last = points[-1]
             if abs(first["x"] - last["x"]) > 0.1 or abs(first["y"] - last["y"]) > 0.1:
                 coastline.add_point(first["x"], first["y"])
+            closed_indices.add(len(result.coastlines))
         result.coastlines.append(coastline)
+
+    # Store closed indices for terrain generation
+    result._closed_indices = closed_indices
 
     # Terrain
     terrain_data = doc.get("terrain", {})
@@ -107,9 +114,11 @@ def load_radarloc_file(filepath: str) -> RadarLocationData:
     # Ensure coastlines create occlusion terrain.
     # - No explicit terrain: generate 13m land from coastline polygons
     # - Explicit terrain: merge 13m minimum for land areas (use max of real vs 13m)
+    # Only use CLOSED polygons for terrain fill (unclosed are shoreline segments)
     if result.coastlines:
         coastline_terrain = _terrain_from_coastlines(
-            result.coastlines, result.range_nm)
+            result.coastlines, result.range_nm,
+            closed_indices=result._closed_indices)
         if result.terrain is None:
             result.terrain = coastline_terrain
         elif coastline_terrain is not None:
@@ -158,18 +167,23 @@ def _merge_terrain(explicit: HeightMap, coastline: HeightMap) -> HeightMap:
 
 def _terrain_from_coastlines(coastlines: list, range_nm: float,
                              land_height: float = 13.0,
-                             grid_size: int = 128) -> HeightMap:
+                             grid_size: int = 128,
+                             closed_indices: set = None) -> HeightMap:
     """Generate a terrain height map by rasterizing coastline polygons.
 
     Water features (lakes, rivers, ocean) are defined by polygons that
     enclose WATER, not land. So we start with the entire grid as land,
-    then carve out water areas where the polygons are.
+    then carve out water areas where the CLOSED polygons are.
+
+    Unclosed polygons (shoreline segments) are skipped for fill operations
+    as they would produce incorrect results.
 
     Args:
         coastlines: List of Coastline objects (polygons enclosing water).
         range_nm: Radar range in nautical miles (defines grid extent).
         land_height: Default land elevation in meters.
         grid_size: Grid resolution (rows and cols).
+        closed_indices: Set of indices indicating which coastlines are closed.
 
     Returns:
         HeightMap with land cells elevated, water cells at 0.
@@ -182,11 +196,19 @@ def _terrain_from_coastlines(coastlines: list, range_nm: float,
     # Start with all land
     grid = np.full((grid_size, grid_size), land_height, dtype=np.float32)
 
-    # Carve out water areas (inside polygons = water = 0)
-    for coastline in coastlines:
+    if closed_indices is None:
+        closed_indices = set(range(len(coastlines)))  # Assume all closed
+
+    # Carve out water areas (inside CLOSED polygons = water = 0)
+    for idx, coastline in enumerate(coastlines):
+        # Only process closed polygons for terrain fill
+        if idx not in closed_indices:
+            continue
+
         pts = coastline.points
         if len(pts) < 3:
             continue
+
         # Scanline fill: for each grid row, find edge crossings
         for r in range(grid_size):
             wy = origin_y + (r + 0.5) * cell_size
