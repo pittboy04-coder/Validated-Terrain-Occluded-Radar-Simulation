@@ -104,17 +104,60 @@ def load_radarloc_file(filepath: str) -> RadarLocationData:
         )
         result.vessels.append(vessel)
 
-    # If no terrain but we have coastlines, generate a terrain map from
-    # coastline polygons so land areas occlude targets behind them.
-    if result.terrain is None and result.coastlines:
-        result.terrain = _terrain_from_coastlines(
+    # Ensure coastlines create occlusion terrain.
+    # - No explicit terrain: generate 13m land from coastline polygons
+    # - Explicit terrain: merge 13m minimum for land areas (use max of real vs 13m)
+    if result.coastlines:
+        coastline_terrain = _terrain_from_coastlines(
             result.coastlines, result.range_nm)
+        if result.terrain is None:
+            result.terrain = coastline_terrain
+        elif coastline_terrain is not None:
+            # Merge: land cells get max(explicit_elevation, 13m)
+            result.terrain = _merge_terrain(result.terrain, coastline_terrain)
 
     return result
 
 
+def _merge_terrain(explicit: HeightMap, coastline: HeightMap) -> HeightMap:
+    """Merge explicit elevation data with coastline-derived terrain.
+
+    For each cell, use the maximum of explicit elevation and coastline
+    elevation (13m for land, 0 for water). This ensures land areas have
+    at least 13m elevation for occlusion even if explicit data is lower.
+    """
+    # Resample coastline grid to match explicit grid dimensions
+    ex_grid = explicit.grid
+    co_grid = coastline.grid
+    ex_rows, ex_cols = ex_grid.shape
+    co_rows, co_cols = co_grid.shape
+
+    # If grids match, simple element-wise max
+    if ex_rows == co_rows and ex_cols == co_cols:
+        merged = np.maximum(ex_grid, co_grid)
+    else:
+        # Resample coastline to explicit grid size
+        from scipy.ndimage import zoom
+        scale_r = ex_rows / co_rows
+        scale_c = ex_cols / co_cols
+        try:
+            co_resampled = zoom(co_grid, (scale_r, scale_c), order=0)
+            merged = np.maximum(ex_grid, co_resampled[:ex_rows, :ex_cols])
+        except ImportError:
+            # No scipy - use nearest neighbor manually
+            co_resampled = np.zeros_like(ex_grid)
+            for r in range(ex_rows):
+                src_r = min(int(r / scale_r), co_rows - 1)
+                for c in range(ex_cols):
+                    src_c = min(int(c / scale_c), co_cols - 1)
+                    co_resampled[r, c] = co_grid[src_r, src_c]
+            merged = np.maximum(ex_grid, co_resampled)
+
+    return HeightMap(explicit.config, merged.astype(np.float32))
+
+
 def _terrain_from_coastlines(coastlines: list, range_nm: float,
-                             land_height: float = 8.0,
+                             land_height: float = 13.0,
                              grid_size: int = 128) -> HeightMap:
     """Generate a terrain height map by rasterizing coastline polygons.
 
