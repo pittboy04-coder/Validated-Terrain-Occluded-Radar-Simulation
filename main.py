@@ -186,7 +186,9 @@ def main():
             sim.update()
             current_bearing = sim.radar.get_current_bearing()
 
-            if int(current_bearing) != int(last_bearing):
+            # Use 0.5° steps for 720 spokes per rotation (360/0.5 = 720)
+            angular_step = 0.5
+            if int(current_bearing / angular_step) != int(last_bearing / angular_step):
                 sweep_data = sim.get_radar_sweep_data(current_bearing)
                 ppi.draw_sweep_data(current_bearing, sweep_data)
 

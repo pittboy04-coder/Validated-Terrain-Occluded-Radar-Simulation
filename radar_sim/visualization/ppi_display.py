@@ -28,8 +28,9 @@ class PPIDisplay:
         self.trail_persistence = 0.95
 
         # Beam broadening: draw each sweep across ±beam_half_width degrees
-        self.beam_half_width_deg = 0.6  # ±0.6° = 1.2° total beamwidth
-        self.beam_lines = 3  # Number of adjacent radial lines per sweep
+        # For 720 spokes (0.5° steps), use slightly wider beam to ensure overlap
+        self.beam_half_width_deg = 0.4  # ±0.4° = 0.8° total beamwidth
+        self.beam_lines = 5  # Number of adjacent radial lines per sweep
 
         # Surfaces
         self.surface: Optional[pygame.Surface] = None
