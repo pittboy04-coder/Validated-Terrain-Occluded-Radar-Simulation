@@ -221,28 +221,41 @@ class PPIDisplay:
         pygame.draw.line(self.surface, crosshair_color,
                          (x, y - crosshair_size), (x, y + crosshair_size), 1)
 
-    def render(self, tracked_targets=None) -> pygame.Surface:
+    # Color scheme for different target classifications
+    CLASS_COLORS = {
+        'buoy': (255, 255, 0),     # Yellow - navigation marker
+        'sailing': (135, 206, 250), # Light blue - recreational
+        'fishing': (144, 238, 144), # Light green - working vessel
+        'pilot': (255, 165, 0),    # Orange - service vessel
+        'tug': (255, 140, 0),      # Dark orange - service vessel
+        'cargo': (255, 100, 100),  # Red - commercial
+        'tanker': (255, 50, 50),   # Bright red - large commercial
+        'passenger': (255, 105, 180), # Pink - passenger vessel
+        'land': (139, 119, 85),    # Brown - land mass
+        'unknown': (200, 200, 200), # Gray - unclassified
+    }
+
+    def render(self, tracked_targets=None, classifier=None) -> pygame.Surface:
         self.draw_background()
         self.surface.blit(self.echo_surface, (0, 0))
         if tracked_targets:
-            self.draw_target_labels(tracked_targets)
+            self.draw_target_labels(tracked_targets, classifier)
         self.draw_cursor_crosshairs()
         self.draw_sweep_line(self.current_bearing)
         self._draw_range_labels()
         return self.surface
 
-    def draw_target_labels(self, tracked_targets) -> None:
+    def draw_target_labels(self, tracked_targets, classifier=None) -> None:
         """Draw labels for tracked targets on the PPI display.
 
         Args:
             tracked_targets: List of TrackedTarget objects to label.
+            classifier: Optional TargetClassifier for type identification.
         """
         if self.font is None:
             self.font = pygame.font.Font(None, 18)
 
         label_font = pygame.font.Font(None, 16)
-        label_color = (255, 255, 0)  # Yellow for target labels
-        box_color = (40, 40, 0)      # Dark background for readability
 
         for target in tracked_targets:
             # Convert polar to screen coordinates
@@ -252,28 +265,42 @@ class PPIDisplay:
             if not (0 <= x < self.size and 0 <= y < self.size):
                 continue
 
-            # Draw target marker (small circle)
-            pygame.draw.circle(self.surface, label_color, (x, y), 4, 1)
+            # Get classification if classifier available
+            if classifier:
+                target_class, confidence = classifier.classify(target)
+                class_name = target_class.value
+                label_text = classifier.get_label(target)
+            else:
+                class_name = 'unknown'
+                label_text = target.label
+                confidence = 0.5
 
-            # Draw label with background
-            label_text = target.label
-            if hasattr(target, 'intensity'):
-                # Show range in nm if we have range_ratio
-                range_nm = target.range_ratio * self.range_nm
-                label_text = f"{target.label} ({range_nm:.1f}nm)"
+            # Get color for this class
+            label_color = self.CLASS_COLORS.get(class_name, self.CLASS_COLORS['unknown'])
+            box_color = tuple(c // 5 for c in label_color)  # Darker background
 
-            text_surface = label_font.render(label_text, True, label_color)
+            # Adjust marker size based on confidence
+            marker_size = 3 + int(confidence * 3)
+
+            # Draw target marker (circle with class-specific color)
+            pygame.draw.circle(self.surface, label_color, (x, y), marker_size, 2)
+
+            # Add range to label
+            range_nm = target.range_ratio * self.range_nm
+            full_label = f"{label_text} ({range_nm:.1f}nm)"
+
+            text_surface = label_font.render(full_label, True, label_color)
             text_rect = text_surface.get_rect()
 
             # Position label offset from target
-            label_x = x + 8
-            label_y = y - 8
+            label_x = x + 10
+            label_y = y - 10
 
             # Keep label on screen
             if label_x + text_rect.width > self.size - 5:
-                label_x = x - text_rect.width - 8
+                label_x = x - text_rect.width - 10
             if label_y < 5:
-                label_y = y + 8
+                label_y = y + 10
 
             # Draw background box
             bg_rect = pygame.Rect(label_x - 2, label_y - 1,
@@ -283,6 +310,13 @@ class PPIDisplay:
 
             # Draw text
             self.surface.blit(text_surface, (label_x, label_y))
+
+            # Draw confidence bar below label (if classified)
+            if classifier and confidence > 0.3:
+                bar_width = int((text_rect.width) * confidence)
+                bar_rect = pygame.Rect(label_x, label_y + text_rect.height + 2,
+                                        bar_width, 2)
+                pygame.draw.rect(self.surface, label_color, bar_rect)
 
     def draw_track_info(self, surface: pygame.Surface, x: int, y: int,
                          tracker) -> None:

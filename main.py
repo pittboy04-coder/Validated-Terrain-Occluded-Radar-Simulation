@@ -10,7 +10,7 @@ from radar_sim.visualization.scene_view import SceneView
 from radar_sim.ui.control_panel import ControlPanel
 from radar_sim.scenarios.scenario_manager import ScenarioManager
 from radar_sim.scenarios.presets import PRESET_SCENARIOS
-from radar_sim.detection import TargetDetector, TargetTracker
+from radar_sim.detection import TargetDetector, TargetTracker, TargetClassifier
 
 WINDOW_WIDTH = 1400
 WINDOW_HEIGHT = 900
@@ -84,10 +84,11 @@ def main():
     current_range_idx = (range_scales.index(sim.radar.params.current_range_nm)
                          if sim.radar.params.current_range_nm in range_scales else 5)
 
-    # Target detection and tracking for CSV playback
+    # Target detection, tracking, and classification for CSV playback
     detector = TargetDetector(min_intensity=0.15, min_width=2, max_width=50)
     tracker = TargetTracker(bearing_gate_deg=3.0, range_gate_ratio=0.05,
                             max_misses=5, min_hits_for_label=3)
+    classifier = TargetClassifier(range_nm=sim.radar.params.current_range_nm)
 
     running = True
     last_bearing = 0.0
@@ -203,6 +204,7 @@ def main():
 
             # Ensure PPI range is set for CSV playback (use current radar range)
             ppi.set_range(sim.radar.params.current_range_nm)
+            classifier.set_range(sim.radar.params.current_range_nm)
 
             # Detect and track targets in CSV data
             detections = detector.detect_multiple_sweeps(sweep_pairs)
@@ -238,8 +240,9 @@ def main():
         # Render
         screen.fill((20, 20, 30))
 
-        # PPI (with target labels if in CSV mode)
-        ppi_surface = ppi.render(tracked_targets=tracked_targets)
+        # PPI (with classified target labels if in CSV mode)
+        ppi_surface = ppi.render(tracked_targets=tracked_targets,
+                                  classifier=classifier if csv_is_active else None)
         screen.blit(ppi_surface, (ppi_x, ppi_y))
 
         # Scene view (with terrain + occlusion visualization)
