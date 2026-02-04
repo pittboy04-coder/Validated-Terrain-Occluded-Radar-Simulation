@@ -10,6 +10,7 @@ from radar_sim.visualization.scene_view import SceneView
 from radar_sim.ui.control_panel import ControlPanel
 from radar_sim.scenarios.scenario_manager import ScenarioManager
 from radar_sim.scenarios.presets import PRESET_SCENARIOS
+from radar_sim.detection import TargetDetector, TargetTracker
 
 WINDOW_WIDTH = 1400
 WINDOW_HEIGHT = 900
@@ -76,9 +77,17 @@ def main():
     control_panel.set_scenario_manager(scenario_manager)
     control_panel.set_scene_view(scene_view)
 
+    # Track CSV player state to reset tracker when mode changes
+    csv_was_active = False
+
     range_scales = sim.radar.params.range_scales_nm
     current_range_idx = (range_scales.index(sim.radar.params.current_range_nm)
                          if sim.radar.params.current_range_nm in range_scales else 5)
+
+    # Target detection and tracking for CSV playback
+    detector = TargetDetector(min_intensity=0.15, min_width=2, max_width=50)
+    tracker = TargetTracker(bearing_gate_deg=3.0, range_gate_ratio=0.05,
+                            max_misses=5, min_hits_for_label=3)
 
     running = True
     last_bearing = 0.0
@@ -178,10 +187,25 @@ def main():
 
         # CSV playback mode or normal simulation
         sweep_pairs = None
-        if control_panel.csv_player and control_panel.csv_player.active:
+        tracked_targets = None
+        csv_is_active = control_panel.csv_player and control_panel.csv_player.active
+
+        # Reset tracker when CSV mode changes
+        if csv_is_active and not csv_was_active:
+            tracker.reset()
+        csv_was_active = csv_is_active
+
+        if csv_is_active:
             sweep_pairs = control_panel.csv_player.get_next_sweeps()
             for bearing, data in sweep_pairs:
                 ppi.draw_sweep_data(bearing, data)
+                current_bearing = bearing
+
+            # Detect and track targets in CSV data
+            if sweep_pairs:
+                detections = detector.detect_multiple_sweeps(sweep_pairs)
+                tracker.update(detections, current_bearing)
+                tracked_targets = tracker.get_stable_tracks()
         else:
             sim.update()
             current_bearing = sim.radar.get_current_bearing()
@@ -212,8 +236,8 @@ def main():
         # Render
         screen.fill((20, 20, 30))
 
-        # PPI
-        ppi_surface = ppi.render()
+        # PPI (with target labels if in CSV mode)
+        ppi_surface = ppi.render(tracked_targets=tracked_targets)
         screen.blit(ppi_surface, (ppi_x, ppi_y))
 
         # Scene view (with terrain + occlusion visualization)
@@ -230,6 +254,10 @@ def main():
 
         # Cursor info
         ppi.draw_cursor_info(screen, ppi_x, ppi_y + display_size + 5)
+
+        # Track info (when in CSV playback mode)
+        if tracked_targets is not None:
+            ppi.draw_track_info(screen, ppi_x + 150, ppi_y + display_size + 5, tracker)
 
         # Control panel
         control_panel.draw(screen)

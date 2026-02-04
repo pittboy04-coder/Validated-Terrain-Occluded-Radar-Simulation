@@ -221,13 +221,100 @@ class PPIDisplay:
         pygame.draw.line(self.surface, crosshair_color,
                          (x, y - crosshair_size), (x, y + crosshair_size), 1)
 
-    def render(self) -> pygame.Surface:
+    def render(self, tracked_targets=None) -> pygame.Surface:
         self.draw_background()
         self.surface.blit(self.echo_surface, (0, 0))
+        if tracked_targets:
+            self.draw_target_labels(tracked_targets)
         self.draw_cursor_crosshairs()
         self.draw_sweep_line(self.current_bearing)
         self._draw_range_labels()
         return self.surface
+
+    def draw_target_labels(self, tracked_targets) -> None:
+        """Draw labels for tracked targets on the PPI display.
+
+        Args:
+            tracked_targets: List of TrackedTarget objects to label.
+        """
+        if self.font is None:
+            self.font = pygame.font.Font(None, 18)
+
+        label_font = pygame.font.Font(None, 16)
+        label_color = (255, 255, 0)  # Yellow for target labels
+        box_color = (40, 40, 0)      # Dark background for readability
+
+        for target in tracked_targets:
+            # Convert polar to screen coordinates
+            x, y = self._polar_to_screen(target.range_ratio, target.bearing_deg)
+
+            # Skip if outside display
+            if not (0 <= x < self.size and 0 <= y < self.size):
+                continue
+
+            # Draw target marker (small circle)
+            pygame.draw.circle(self.surface, label_color, (x, y), 4, 1)
+
+            # Draw label with background
+            label_text = target.label
+            if hasattr(target, 'intensity'):
+                # Show range in nm if we have range_ratio
+                range_nm = target.range_ratio * self.range_nm
+                label_text = f"{target.label} ({range_nm:.1f}nm)"
+
+            text_surface = label_font.render(label_text, True, label_color)
+            text_rect = text_surface.get_rect()
+
+            # Position label offset from target
+            label_x = x + 8
+            label_y = y - 8
+
+            # Keep label on screen
+            if label_x + text_rect.width > self.size - 5:
+                label_x = x - text_rect.width - 8
+            if label_y < 5:
+                label_y = y + 8
+
+            # Draw background box
+            bg_rect = pygame.Rect(label_x - 2, label_y - 1,
+                                   text_rect.width + 4, text_rect.height + 2)
+            pygame.draw.rect(self.surface, box_color, bg_rect)
+            pygame.draw.rect(self.surface, label_color, bg_rect, 1)
+
+            # Draw text
+            self.surface.blit(text_surface, (label_x, label_y))
+
+    def draw_track_info(self, surface: pygame.Surface, x: int, y: int,
+                         tracker) -> None:
+        """Draw track count information panel.
+
+        Args:
+            surface: Surface to draw on.
+            x: X position.
+            y: Y position.
+            tracker: TargetTracker instance.
+        """
+        if self.font is None:
+            self.font = pygame.font.Font(None, 22)
+
+        total = tracker.get_track_count()
+        stable = tracker.get_stable_count()
+
+        info_lines = [
+            f"Tracks: {total}",
+            f"Stable: {stable}",
+        ]
+
+        box_width = 100
+        box_height = len(info_lines) * 18 + 10
+        box_rect = pygame.Rect(x, y, box_width, box_height)
+
+        pygame.draw.rect(surface, (20, 30, 20), box_rect)
+        pygame.draw.rect(surface, (0, 100, 0), box_rect, 1)
+
+        for i, line in enumerate(info_lines):
+            text = self.font.render(line, True, self.text_color)
+            surface.blit(text, (x + 5, y + 5 + i * 18))
 
     def _draw_range_labels(self) -> None:
         if self.font is None:
