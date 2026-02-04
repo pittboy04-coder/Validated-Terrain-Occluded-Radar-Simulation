@@ -201,11 +201,13 @@ def main():
                 ppi.draw_sweep_data(bearing, data)
                 current_bearing = bearing
 
+            # Ensure PPI range is set for CSV playback (use current radar range)
+            ppi.set_range(sim.radar.params.current_range_nm)
+
             # Detect and track targets in CSV data
-            if sweep_pairs:
-                detections = detector.detect_multiple_sweeps(sweep_pairs)
-                tracker.update(detections, current_bearing)
-                tracked_targets = tracker.get_stable_tracks()
+            detections = detector.detect_multiple_sweeps(sweep_pairs)
+            tracker.update(detections, current_bearing)
+            tracked_targets = tracker.get_stable_tracks()
         else:
             sim.update()
             current_bearing = sim.radar.get_current_bearing()

@@ -74,18 +74,6 @@ class TargetTracker:
             detections: List of Detection objects from current sweep(s).
             current_bearing: Current radar bearing in degrees.
         """
-        # Only process if we have detections for a new bearing sector
-        if not detections:
-            return
-
-        # Group detections by approximate bearing
-        bearing_groups: Dict[int, List[Detection]] = {}
-        for det in detections:
-            key = int(det.bearing_deg / 2) * 2  # 2-degree bins
-            if key not in bearing_groups:
-                bearing_groups[key] = []
-            bearing_groups[key].append(det)
-
         # Associate detections with existing tracks
         used_detections = set()
 
@@ -134,12 +122,16 @@ class TargetTracker:
 
     def _bearing_passed(self, target_bearing: float,
                          old_bearing: float, new_bearing: float) -> bool:
-        """Check if radar sweep passed over a bearing."""
+        """Check if radar sweep passed over a bearing.
+
+        Uses exclusive start (old_bearing < target) to avoid double-counting
+        when the sweep starts exactly at the target bearing.
+        """
         # Handle wraparound
         if old_bearing > new_bearing:
             # Crossed 360/0
-            return target_bearing >= old_bearing or target_bearing <= new_bearing
-        return old_bearing <= target_bearing <= new_bearing
+            return target_bearing > old_bearing or target_bearing <= new_bearing
+        return old_bearing < target_bearing <= new_bearing
 
     def _update_track(self, track: TrackedTarget, det: Detection,
                        current_bearing: float) -> None:
