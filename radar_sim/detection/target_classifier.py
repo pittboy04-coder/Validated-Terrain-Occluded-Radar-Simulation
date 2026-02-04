@@ -45,6 +45,12 @@ class TargetClassifier:
     2. Intensity (reflectivity indicates material/size)
     3. Stability (consistent detections = real target)
     4. Shape (aspect ratio distinguishes vessel types)
+    5. Range (close targets are often clutter)
+
+    Error Prevention:
+    - Land vs vessel: Land has very stable position, extended size, high hits
+    - Clutter vs target: Clutter has inconsistent detections, low hit count
+    - Size confusion: Uses bin count not meters (consistent across ranges)
     """
 
     def __init__(self, range_nm: float = 6.0, num_bins: int = 512):
@@ -57,6 +63,9 @@ class TargetClassifier:
         self.range_nm = range_nm
         self.num_bins = num_bins
         self.meters_per_bin = (range_nm * 1852.0) / num_bins
+
+        # Minimum range to consider (filters close-range clutter)
+        self.min_range_ratio = 0.02  # ~0.12nm at 6nm range
 
     def set_range(self, range_nm: float) -> None:
         """Update radar range setting."""
@@ -155,6 +164,9 @@ class TargetClassifier:
     def classify(self, tracked_target) -> Tuple[TargetClass, float]:
         """Classify a tracked target based on its geometric features.
 
+        Uses a hierarchical decision tree with priority rules to avoid
+        misclassification from overlapping feature ranges.
+
         Classification uses range extent in BINS (not meters) since radar
         resolution is bin-based. Typical values at 6nm/512 bins (~22m/bin):
         - Buoy: 2-4 bins
@@ -175,134 +187,129 @@ class TargetClassifier:
         if features.detection_count < 3:
             return TargetClass.UNKNOWN, 0.0
 
+        # Filter close-range clutter (typically own-ship noise)
+        if features.range_ratio < self.min_range_ratio:
+            return TargetClass.UNKNOWN, 0.2
+
         # Use bin-based size (more consistent across ranges)
         size_bins = features.range_extent_bins
         intensity = features.peak_intensity
         stability = min(1.0, features.detection_count / 10.0)
         bearing_extent = features.bearing_extent_deg
 
-        # Position stability (land is very stable)
-        position_stable = features.range_spread < 0.01 and features.bearing_spread < 2.0
+        # Position stability metrics
+        # Land: very stable (spread < 0.5°, range_spread < 0.003)
+        # Vessels: moderate variation (spread 0.5-3°, range_spread 0.005-0.02)
+        very_stable = features.range_spread < 0.004 and features.bearing_spread < 0.6
+        is_moving = features.range_spread > 0.008 or features.bearing_spread > 1.2
 
-        # Decision tree classification based on bin size
-        scores = {}
+        # ========== HIERARCHICAL CLASSIFICATION ==========
+        # Uses a priority-based decision tree where unique features
+        # (stability, intensity, bearing extent) determine class FIRST,
+        # before falling through to size-based categories.
 
-        # BUOY: Very small (2-5 bins), point-like, any intensity
-        if size_bins <= 6:
-            score = (
-                0.4 * max(0, 1.0 - abs(size_bins - 3) / 3) +
-                0.3 * (1.0 if bearing_extent < 3 else 0.5) +
-                0.3 * stability
-            )
-            if score > 0.3:
-                scores[TargetClass.BUOY] = score
+        # PRIORITY 1: LAND - Extremely stable position (unique feature)
+        # Land is distinguished by near-zero position variation - no vessel
+        # is this stable, not even at anchor.
+        if size_bins >= 20 and very_stable:
+            stability_score = (1.0 - min(1.0, features.bearing_spread / 0.6)) * \
+                              (1.0 - min(1.0, features.range_spread / 0.004))
+            conf = 0.70 + 0.30 * stability_score
+            return TargetClass.LAND, conf
 
-        # SAILING: Small (3-10 bins), weak return (fiberglass)
-        if 3 <= size_bins <= 12 and intensity < 0.45:
-            score = (
-                0.35 * max(0, 1.0 - abs(size_bins - 6) / 6) +
-                0.35 * (1.0 - intensity / 0.45) +
-                0.3 * stability
-            )
-            if score > 0.3:
-                scores[TargetClass.SAILING] = score
+        # PRIORITY 2: BUOY - Very small (<=4 bins) AND point-like (unique feature)
+        # Buoys are tiny navigation markers with minimal bearing extent
+        # Check BEFORE sailing to catch small point targets
+        if size_bins <= 4 and bearing_extent < 1.8:
+            size_score = max(0, 1.0 - abs(size_bins - 3) / 2)
+            point_score = max(0, 1.0 - bearing_extent / 1.8)
+            conf = 0.62 + 0.20 * size_score + 0.18 * point_score
+            return TargetClass.BUOY, conf
 
-        # FISHING: Small-medium (4-15 bins), moderate return
-        if 4 <= size_bins <= 18 and 0.25 < intensity < 0.6:
-            score = (
-                0.35 * max(0, 1.0 - abs(size_bins - 10) / 10) +
-                0.35 * max(0, 1.0 - abs(intensity - 0.4) / 0.25) +
-                0.3 * stability
-            )
-            if score > 0.3:
-                scores[TargetClass.FISHING] = score
+        # PRIORITY 3: SAILING - Low intensity (unique feature)
+        # Fiberglass/wood hulls have distinctly weak radar returns
+        # Upper threshold set to 0.44 to catch intensity noise
+        if 3 <= size_bins <= 12 and intensity < 0.44:
+            low_int_score = max(0, 1.0 - intensity / 0.44)
+            size_score = max(0, 1.0 - abs(size_bins - 6) / 6)
+            conf = 0.58 + 0.27 * low_int_score + 0.15 * size_score
+            return TargetClass.SAILING, conf
 
-        # PILOT: Small (3-8 bins), medium-strong return, moving
-        if 3 <= size_bins <= 10 and intensity > 0.35:
-            move_indicator = 1.0 if features.range_spread > 0.005 else 0.6
-            score = (
-                0.3 * max(0, 1.0 - abs(size_bins - 5) / 5) +
-                0.3 * min(1.0, intensity / 0.5) +
-                0.2 * stability +
-                0.2 * move_indicator
-            )
-            if score > 0.3:
-                scores[TargetClass.PILOT] = score
+        # PRIORITY 4: TANKER - Very large with very strong return (unique feature)
+        # Only the largest vessels (VLCC, tankers) exceed 35 bins with high intensity
+        if size_bins >= 35 and intensity > 0.70:
+            size_score = min(1.0, (size_bins - 32) / 20)
+            int_score = min(1.0, (intensity - 0.65) / 0.25)
+            conf = 0.65 + 0.20 * size_score + 0.15 * int_score
+            return TargetClass.TANKER, conf
 
-        # TUG: Medium (6-18 bins), strong return (metal hull)
-        if 6 <= size_bins <= 20 and intensity > 0.45:
-            score = (
-                0.35 * max(0, 1.0 - abs(size_bins - 12) / 10) +
-                0.35 * min(1.0, (intensity - 0.3) / 0.4) +
-                0.3 * stability
-            )
-            if score > 0.3:
-                scores[TargetClass.TUG] = score
+        # PRIORITY 5: PILOT - Small (3-7 bins), moving, strong return
+        # Fast patrol/pilot boats are small with strong metal hull returns
+        # Intensity > 0.45 to avoid catching sailing boats
+        if 3 <= size_bins <= 7 and intensity > 0.45 and is_moving:
+            size_score = max(0, 1.0 - abs(size_bins - 5) / 4)
+            move_score = min(1.0, features.range_spread / 0.014)
+            conf = 0.58 + 0.22 * size_score + 0.20 * move_score
+            return TargetClass.PILOT, conf
 
-        # CARGO: Large (12-35 bins), strong return
-        # Upper limit prevents overlap with tanker
-        if 10 <= size_bins <= 38 and intensity > 0.5:
-            # Penalize if too large (likely tanker)
-            size_penalty = max(0, (size_bins - 30) / 10) if size_bins > 30 else 0
-            score = (
-                0.35 * min(1.0, size_bins / 25) +
-                0.35 * min(1.0, (intensity - 0.4) / 0.4) +
-                0.3 * stability
-            ) - size_penalty * 0.3
-            if score > 0.3:
-                scores[TargetClass.CARGO] = score
+        # PRIORITY 6: FISHING vs TUG - Medium size vessels (6-17 bins)
+        # Differentiate by intensity: fishing < 0.60, tug >= 0.60
+        if 6 <= size_bins <= 17:
+            if intensity < 0.60:  # Moderate intensity = fishing
+                size_score = max(0, 1.0 - abs(size_bins - 11) / 8)
+                conf = 0.56 + 0.24 * size_score + 0.20 * stability
+                return TargetClass.FISHING, conf
+            else:  # High intensity = tug (metal hull)
+                size_score = max(0, 1.0 - abs(size_bins - 14) / 6)
+                conf = 0.56 + 0.24 * size_score + 0.20 * min(1.0, (intensity - 0.55) / 0.25)
+                return TargetClass.TUG, conf
 
-        # TANKER: Very large (35+ bins), very strong return
-        # Tankers are the largest vessels with strongest returns
-        if size_bins >= 32 and intensity > 0.70:
-            score = (
-                0.5 * min(1.0, (size_bins - 30) / 15) +
-                0.3 * min(1.0, (intensity - 0.65) / 0.25) +
-                0.2 * stability
-            )
-            if score > 0.4:
-                scores[TargetClass.TANKER] = score
+        # PRIORITY 7: PASSENGER - Large (18-45 bins) with extended bearing
+        # Ferries/cruise ships have high superstructures = wide angular extent
+        # bearing_extent threshold lowered to 3.2 to catch ferry signatures
+        if 18 <= size_bins <= 48 and bearing_extent >= 3.2:
+            extent_score = min(1.0, (bearing_extent - 2.5) / 5.0)
+            size_score = max(0, 1.0 - abs(size_bins - 30) / 18)
+            conf = 0.58 + 0.27 * extent_score + 0.15 * size_score
+            return TargetClass.PASSENGER, conf
 
-        # PASSENGER: Medium-large (15-35 bins), extended in bearing (ferry superstructure)
-        # Distinguish from cargo by requiring bearing spread (superstructure)
-        if 14 <= size_bins <= 40 and intensity > 0.5 and bearing_extent > 4.5:
-            score = (
-                0.25 * max(0, 1.0 - abs(size_bins - 25) / 15) +
-                0.25 * min(1.0, (intensity - 0.4) / 0.4) +
-                0.3 * min(1.0, (bearing_extent - 3) / 8) +
-                0.2 * stability
-            )
-            if score > 0.4:
-                scores[TargetClass.PASSENGER] = score
+        # PRIORITY 8: CARGO - Large vessel (18+ bins)
+        # Generic large vessel classification
+        if size_bins >= 18 and intensity > 0.50:
+            size_score = min(1.0, (size_bins - 15) / 20)
+            conf = 0.60 + 0.20 * size_score + 0.20 * min(1.0, (intensity - 0.45) / 0.35)
+            return TargetClass.CARGO, conf
 
-        # LAND: Very large (25+ bins), extremely stable, strong return
-        if size_bins >= 20 and position_stable and intensity > 0.5:
-            score = (
-                0.25 * min(1.0, size_bins / 40) +
-                0.35 * (1.0 - features.range_spread * 50) +
-                0.2 * (1.0 - features.bearing_spread / 3) +
-                0.2 * min(1.0, intensity / 0.7)
-            )
-            if score > 0.4:
-                scores[TargetClass.LAND] = score
+        # PRIORITY 9: TUG - Medium size (16-20 bins) with strong return
+        # Catches tugs that are slightly larger than the 6-16 FISHING/TUG split
+        if 16 <= size_bins <= 20 and intensity >= 0.55:
+            size_score = max(0, 1.0 - abs(size_bins - 17) / 4)
+            conf = 0.55 + 0.25 * size_score + 0.20 * min(1.0, (intensity - 0.50) / 0.25)
+            return TargetClass.TUG, conf
 
-        # Select highest scoring class
-        if not scores:
-            return TargetClass.UNKNOWN, 0.3 * stability
+        # FALLBACK: Best guess based on size when no specific features match
+        if size_bins >= 25:
+            return TargetClass.CARGO, 0.40
+        elif size_bins >= 12:
+            return TargetClass.TUG, 0.35
+        elif size_bins >= 6:
+            return TargetClass.FISHING, 0.35
+        elif intensity < 0.40:
+            return TargetClass.SAILING, 0.35
+        elif size_bins <= 5:
+            return TargetClass.BUOY, 0.35
+        else:
+            return TargetClass.UNKNOWN, 0.30
 
-        best_class = max(scores, key=scores.get)
-        confidence = min(1.0, scores[best_class])
-
-        return best_class, confidence
-
-    def get_label(self, tracked_target) -> str:
+    def get_label(self, tracked_target, include_confidence: bool = True) -> str:
         """Get display label for a tracked target.
 
         Args:
             tracked_target: TrackedTarget object.
+            include_confidence: If True, append confidence percentage to label.
 
         Returns:
-            String label like "T1:CARGO" or "T3:BUOY".
+            String label like "T1:CARGO 87%" or "T3:BUOY 92%".
         """
         target_class, confidence = self.classify(tracked_target)
 
@@ -323,7 +330,12 @@ class TargetClassifier:
         }
 
         class_name = class_names.get(target_class, "UNK")
-        return f"{tracked_target.label}:{class_name}"
+
+        if include_confidence:
+            conf_pct = int(confidence * 100)
+            return f"{tracked_target.label}:{class_name} {conf_pct}%"
+        else:
+            return f"{tracked_target.label}:{class_name}"
 
     def get_detailed_info(self, tracked_target) -> dict:
         """Get detailed classification info for a target.

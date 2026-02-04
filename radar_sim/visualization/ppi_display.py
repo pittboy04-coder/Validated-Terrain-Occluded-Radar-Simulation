@@ -240,6 +240,9 @@ class PPIDisplay:
         self.surface.blit(self.echo_surface, (0, 0))
         if tracked_targets:
             self.draw_target_labels(tracked_targets, classifier)
+            # Draw legend when classification is active
+            if classifier:
+                self.draw_legend()
         self.draw_cursor_crosshairs()
         self.draw_sweep_line(self.current_bearing)
         self._draw_range_labels()
@@ -364,3 +367,53 @@ class PPIDisplay:
 
             text = self.font.render(label, True, self.grid_color)
             self.surface.blit(text, (label_x, label_y))
+
+    def draw_legend(self, show_all: bool = False) -> None:
+        """Draw target classification legend in corner of PPI.
+
+        Args:
+            show_all: If True, show all classes. If False, show compact legend.
+        """
+        legend_font = pygame.font.Font(None, 14)
+
+        # Compact legend for corner display
+        legend_items = [
+            ('BUOY', 'buoy'),
+            ('SAIL', 'sailing'),
+            ('FISH', 'fishing'),
+            ('TUG', 'tug'),
+            ('CARGO', 'cargo'),
+            ('TANK', 'tanker'),
+            ('FERRY', 'passenger'),
+            ('LAND', 'land'),
+        ]
+
+        # Position in bottom-left corner
+        x_start = 8
+        y_start = self.size - len(legend_items) * 12 - 20
+
+        # Semi-transparent background
+        bg_width = 65
+        bg_height = len(legend_items) * 12 + 18
+        bg_surface = pygame.Surface((bg_width, bg_height), pygame.SRCALPHA)
+        bg_surface.fill((0, 20, 0, 180))
+        self.surface.blit(bg_surface, (x_start - 4, y_start - 4))
+
+        # Title
+        title = legend_font.render("TARGETS", True, (0, 180, 0))
+        self.surface.blit(title, (x_start, y_start))
+        y_start += 14
+
+        # Draw each legend item
+        for label, class_key in legend_items:
+            color = self.CLASS_COLORS.get(class_key, (200, 200, 200))
+
+            # Color swatch
+            pygame.draw.rect(self.surface, color,
+                           (x_start, y_start + 2, 8, 8))
+
+            # Label
+            text = legend_font.render(label, True, color)
+            self.surface.blit(text, (x_start + 12, y_start))
+
+            y_start += 12

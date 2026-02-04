@@ -9,16 +9,18 @@ NM_TO_M = 1852.0
 COLORS = {
     'water_shallow': (70, 130, 180),   # Light steel blue - shallow water
     'water_deep': (15, 35, 75),        # Dark navy - deep water
+    'water': (25, 50, 90),             # Default water for CSV view
     'land': (139, 119, 85),            # Tan/brown for land
     'land_high': (160, 140, 100),      # Lighter tan for higher elevation
     'own_ship': (255, 255, 0),
     'vessel': (255, 100, 100),
     'vessel_label': (255, 180, 180),
-    'range_ring': (100, 120, 150),
-    'grid': (40, 60, 100),
+    'range_ring': (180, 200, 230),     # Brighter - more visible against water
+    'range_ring_label': (200, 220, 255),  # Even brighter for labels
+    'grid': (60, 90, 140),             # Brighter grid lines
     'north_arrow': (255, 255, 255),
     'echo': (0, 200, 0),
-    'title': (180, 200, 220),
+    'title': (200, 220, 240),          # Brighter title
     'occluded': (100, 60, 60),
     'selected': (255, 255, 0),
     'placement': (0, 255, 255),
@@ -480,9 +482,11 @@ class SceneView:
         font = self._get_font(12)
         for i in range(1, num_rings + 1):
             r = int(self.radius * i / num_rings)
-            pygame.draw.circle(self.surface, COLORS['range_ring'], self.center, r, 1)
+            # Draw ring with slightly thicker line for visibility
+            pygame.draw.circle(self.surface, COLORS['range_ring'], self.center, r, 2)
             ring_nm = range_nm * i / num_rings
-            label = font.render(f"{ring_nm:.1f}nm", True, COLORS['range_ring'])
+            # Use brighter color for labels
+            label = font.render(f"{ring_nm:.1f}nm", True, COLORS['range_ring_label'])
             self.surface.blit(label, (self.center[0] + 4, self.center[1] - r + 2))
 
     def _draw_vessel_marker(self, x: int, y: int, heading: float,
