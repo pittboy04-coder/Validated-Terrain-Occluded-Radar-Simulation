@@ -131,9 +131,9 @@ def load_radarloc_file(filepath: str) -> RadarLocationData:
 def _merge_terrain(explicit: HeightMap, coastline: HeightMap) -> HeightMap:
     """Merge explicit elevation data with coastline-derived terrain.
 
-    For each cell, use the maximum of explicit elevation and coastline
-    elevation (13m for land, 0 for water). This ensures land areas have
-    at least 13m elevation for occlusion even if explicit data is lower.
+    Rules:
+    - Water areas (coastline=0): Always use 0m (water overrides explicit terrain)
+    - Land areas (coastline>0): Use max(explicit, coastline) for occlusion
     """
     # Resample coastline grid to match explicit grid dimensions
     ex_grid = explicit.grid
@@ -141,17 +141,13 @@ def _merge_terrain(explicit: HeightMap, coastline: HeightMap) -> HeightMap:
     ex_rows, ex_cols = ex_grid.shape
     co_rows, co_cols = co_grid.shape
 
-    # If grids match, simple element-wise max
-    if ex_rows == co_rows and ex_cols == co_cols:
-        merged = np.maximum(ex_grid, co_grid)
-    else:
-        # Resample coastline to explicit grid size
+    # Resample coastline if needed
+    if ex_rows != co_rows or ex_cols != co_cols:
         from scipy.ndimage import zoom
         scale_r = ex_rows / co_rows
         scale_c = ex_cols / co_cols
         try:
-            co_resampled = zoom(co_grid, (scale_r, scale_c), order=0)
-            merged = np.maximum(ex_grid, co_resampled[:ex_rows, :ex_cols])
+            co_grid = zoom(co_grid, (scale_r, scale_c), order=0)[:ex_rows, :ex_cols]
         except ImportError:
             # No scipy - use nearest neighbor manually
             co_resampled = np.zeros_like(ex_grid)
@@ -159,8 +155,11 @@ def _merge_terrain(explicit: HeightMap, coastline: HeightMap) -> HeightMap:
                 src_r = min(int(r / scale_r), co_rows - 1)
                 for c in range(ex_cols):
                     src_c = min(int(c / scale_c), co_cols - 1)
-                    co_resampled[r, c] = co_grid[src_r, src_c]
-            merged = np.maximum(ex_grid, co_resampled)
+                    co_resampled[r, c] = coastline.grid[src_r, src_c]
+            co_grid = co_resampled
+
+    # Merge: water (coastline=0) stays 0, land uses max elevation
+    merged = np.where(co_grid == 0, 0.0, np.maximum(ex_grid, co_grid))
 
     return HeightMap(explicit.config, merged.astype(np.float32))
 
