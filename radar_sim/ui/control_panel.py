@@ -200,28 +200,34 @@ class ControlPanel:
         y_offset += 220
 
         # --- Validation panel ---
-        self.validation_panel = Panel(10, y_offset, panel_width, 200, "VALIDATION")
-        val_btn_w = (panel_width - 40) // 2
+        self.validation_panel = Panel(10, y_offset, panel_width, 235, "VALIDATION")
+        val_btn_w = (panel_width - 50) // 3
         self.load_ref_button = Button(
             15, 35, val_btn_w, 28, "LOAD REF",
             callback=self._on_load_reference)
         self.compare_button = Button(
             20 + val_btn_w, 35, val_btn_w, 28, "COMPARE",
             callback=self._on_compare)
+        self.advanced_val_button = Button(
+            25 + val_btn_w * 2, 35, val_btn_w, 28, "ADVANCED",
+            callback=self._on_advanced_validation)
         self.val_overall_label = Label(20, 70, "Overall: --", 18)
         self.val_blob_label = Label(20, 90, "Blob: --", 16)
         self.val_intensity_label = Label(20, 108, "Intensity: --", 16)
         self.val_clutter_label = Label(20, 126, "Clutter: --", 16)
         self.val_noise_label = Label(20, 144, "Noise: --", 16)
         self.val_sparsity_label = Label(20, 162, "Sparsity: --", 16)
+        self.val_info_label = Label(20, 182, "Click ADVANCED for full validation tool", 14)
         self.validation_panel.add_widget(self.load_ref_button)
         self.validation_panel.add_widget(self.compare_button)
+        self.validation_panel.add_widget(self.advanced_val_button)
         self.validation_panel.add_widget(self.val_overall_label)
         self.validation_panel.add_widget(self.val_blob_label)
         self.validation_panel.add_widget(self.val_intensity_label)
         self.validation_panel.add_widget(self.val_clutter_label)
         self.validation_panel.add_widget(self.val_noise_label)
         self.validation_panel.add_widget(self.val_sparsity_label)
+        self.validation_panel.add_widget(self.val_info_label)
         y_offset += 210
 
         # --- Baseline Editor panel ---
@@ -686,6 +692,23 @@ class ControlPanel:
         self.val_clutter_label.set_text(f"Clutter: {report.clutter_score:.3f}")
         self.val_noise_label.set_text(f"Noise: {report.noise_score:.3f}")
         self.val_sparsity_label.set_text(f"Sparsity: {report.sparsity_score:.3f}")
+
+    def _on_advanced_validation(self) -> None:
+        """Launch the advanced validation GUI."""
+        import threading
+
+        def launch():
+            try:
+                from ..validation.validation_gui import ValidationApp
+                app = ValidationApp(simulation=self.simulation)
+                app.mainloop()
+            except Exception as e:
+                print(f"Failed to launch validation GUI: {e}")
+
+        # Launch in separate thread to avoid blocking pygame
+        thread = threading.Thread(target=launch, daemon=True)
+        thread.start()
+        self.val_info_label.set_text("Validation tool launched")
 
     # --- Editor callbacks ---
 
