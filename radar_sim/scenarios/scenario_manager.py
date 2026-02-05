@@ -204,3 +204,103 @@ class ScenarioManager:
         if self.current_scenario:
             return self.scenarios.get(self.current_scenario)
         return None
+
+    def load_from_capture(self, metadata, world: World, radar: RadarSystem,
+                          weather: WeatherEffects, simulation=None) -> bool:
+        """Load simulator settings from analyzed capture metadata.
+
+        Auto-configures radar settings, spawns detected objects as vessels,
+        and optionally triggers location loading if GPS data is available.
+
+        Args:
+            metadata: CaptureMetadata from baseline_editor.CaptureAnalyzer
+            world: World instance to populate with vessels.
+            radar: Radar system to configure.
+            weather: Weather effects instance.
+            simulation: Optional Simulation instance for terrain/coastline.
+
+        Returns:
+            True on success.
+        """
+        from ..baseline_editor import CaptureMetadata
+
+        if not isinstance(metadata, CaptureMetadata):
+            return False
+
+        # Clear existing state
+        world.clear()
+        radar.clear_sweep_buffer()
+
+        if simulation is not None:
+            simulation.clear_terrain()
+            simulation.clear_coastlines()
+
+        # Place own ship at origin
+        own_ship = Vessel(
+            id="own_ship", name="Own Ship",
+            vessel_type=VesselType.OWN_SHIP,
+            x=0.0, y=0.0, course=0.0, speed=0.0)
+        world.add_vessel(own_ship)
+
+        # Apply radar settings
+        radar.set_range_scale(metadata.range_nm)
+        radar.set_gain(metadata.gain)
+        radar.set_sea_clutter(metadata.sea_clutter)
+        radar.set_rain_clutter(metadata.rain_clutter)
+
+        # Spawn detected objects as static vessels
+        import math
+        for i, (range_m, bearing_deg, rcs) in enumerate(metadata.detected_objects):
+            # Convert polar to cartesian
+            bearing_rad = math.radians(bearing_deg)
+            x = range_m * math.sin(bearing_rad)
+            y = range_m * math.cos(bearing_rad)
+
+            # Estimate vessel type from RCS
+            if rcs < 30:
+                vtype = VesselType.BUOY
+                length, beam, height = 3.0, 2.0, 5.0
+            elif rcs < 100:
+                vtype = VesselType.FISHING
+                length, beam, height = 15.0, 5.0, 8.0
+            elif rcs < 300:
+                vtype = VesselType.CARGO
+                length, beam, height = 50.0, 10.0, 15.0
+            else:
+                vtype = VesselType.TANKER
+                length, beam, height = 100.0, 20.0, 20.0
+
+            vessel = Vessel(
+                id=f"detected_{i}",
+                name=f"Target {i+1}",
+                vessel_type=vtype,
+                x=x, y=y,
+                course=0.0, speed=0.0,
+                length=length, beam=beam, height=height,
+                rcs=rcs
+            )
+            world.add_vessel(vessel)
+
+        # Update current scenario name
+        location_str = ""
+        if metadata.gps_lat is not None and metadata.gps_lon is not None:
+            if metadata.location_name:
+                location_str = metadata.location_name
+            else:
+                location_str = f"{metadata.gps_lat:.4f}, {metadata.gps_lon:.4f}"
+        else:
+            location_str = "Unknown Location"
+
+        self.current_scenario = f"CAPTURE:{location_str}"
+
+        num_objects = len(metadata.detected_objects)
+        if self.on_scenario_loaded:
+            scenario = Scenario(
+                name=self.current_scenario,
+                description=f"Loaded from capture: {num_objects} objects",
+                vessels=[],
+                radar_range_nm=metadata.range_nm,
+            )
+            self.on_scenario_loaded(scenario)
+
+        return True

@@ -172,7 +172,7 @@ class ControlPanel:
         y_offset += 150
 
         # Data Export panel
-        self.export_panel = Panel(10, y_offset, panel_width, 175, "DATA EXPORT")
+        self.export_panel = Panel(10, y_offset, panel_width, 210, "DATA EXPORT")
         btn_width = (panel_width - 50) // 3
         self.record_button = Button(
             15, 35, btn_width, 28, "RECORD",
@@ -185,12 +185,19 @@ class ControlPanel:
             callback=self._on_load_csv)
         self.record_label = Label(20, 70, "Not recording", 18)
         self.file_label = Label(20, 90, "", 16)
+        # Capture analysis button
+        self.load_capture_button = Button(
+            15, 115, panel_width - 30, 28, "LOAD CAPTURE",
+            callback=self._on_load_capture)
+        self.capture_label = Label(20, 150, "", 16)
         self.export_panel.add_widget(self.record_button)
         self.export_panel.add_widget(self.save_button)
         self.export_panel.add_widget(self.csv_button)
         self.export_panel.add_widget(self.record_label)
         self.export_panel.add_widget(self.file_label)
-        y_offset += 185
+        self.export_panel.add_widget(self.load_capture_button)
+        self.export_panel.add_widget(self.capture_label)
+        y_offset += 220
 
         # --- Validation panel ---
         self.validation_panel = Panel(10, y_offset, panel_width, 200, "VALIDATION")
@@ -473,6 +480,150 @@ class ControlPanel:
                 else:
                     self.csv_player = None
                     self.file_label.set_text("No CSV files found")
+
+    def _on_load_capture(self) -> None:
+        """Analyze a capture folder and auto-configure the simulator."""
+        if not self.scenario_manager or not self.simulation:
+            return
+
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        folder = filedialog.askdirectory(title="Select Capture Folder (CSV files)")
+        root.destroy()
+
+        if not folder:
+            return
+
+        self.capture_label.set_text("Analyzing...")
+
+        try:
+            from ..baseline_editor import CaptureAnalyzer
+            analyzer = CaptureAnalyzer()
+            metadata = analyzer.analyze_csv_folder(folder)
+
+            if metadata is None:
+                self.capture_label.set_text("Analysis failed")
+                return
+
+            # Load into simulator
+            success = self.scenario_manager.load_from_capture(
+                metadata,
+                self.simulation.world,
+                self.simulation.radar,
+                self.simulation.weather,
+                simulation=self.simulation
+            )
+
+            if success:
+                # Update UI controls to reflect loaded settings
+                self.gain_slider.value = metadata.gain
+                self.sea_slider.value = metadata.sea_clutter
+                self.rain_slider.value = metadata.rain_clutter
+
+                # Find matching range dropdown index
+                range_options = [0.25, 0.5, 0.75, 1.5, 3, 6, 12, 24, 48]
+                closest_idx = 5  # default 6nm
+                min_diff = float('inf')
+                for i, r in enumerate(range_options):
+                    diff = abs(r - metadata.range_nm)
+                    if diff < min_diff:
+                        min_diff = diff
+                        closest_idx = i
+                self.range_dropdown.selected = closest_idx
+                self.range_input.text = f"{metadata.range_nm:.1f}"
+
+                # Update labels
+                num_objects = len(metadata.detected_objects)
+                location_info = ""
+                if metadata.location_name:
+                    location_info = metadata.location_name
+                elif metadata.gps_lat is not None:
+                    location_info = f"{metadata.gps_lat:.4f}, {metadata.gps_lon:.4f}"
+
+                if location_info:
+                    self.capture_label.set_text(f"{num_objects} objects, {location_info}")
+                else:
+                    self.capture_label.set_text(f"Loaded: {num_objects} objects")
+
+                if metadata.location_name and len(metadata.location_name) <= 40:
+                    self.scenario_name_label.set_text(metadata.location_name)
+                elif location_info:
+                    self.scenario_name_label.set_text(f"Capture: {location_info[:35]}")
+                else:
+                    self.scenario_name_label.set_text("Capture loaded")
+
+                self.pause_button.text = "PAUSE"
+
+                # If GPS data available, optionally trigger location generation
+                if metadata.gps_lat is not None and metadata.gps_lon is not None:
+                    self._trigger_location_from_gps(metadata.gps_lat, metadata.gps_lon,
+                                                    metadata.range_nm)
+            else:
+                self.capture_label.set_text("Load failed")
+
+        except Exception as e:
+            self.capture_label.set_text(f"Error: {str(e)[:30]}")
+
+    def _trigger_location_from_gps(self, lat: float, lon: float, range_nm: float) -> None:
+        """Attempt to generate and load a location file from GPS coordinates.
+
+        This is a best-effort operation - if it fails, the capture still loads.
+        """
+        try:
+            import subprocess
+            import tempfile
+            import os
+
+            # Try to find the location generator
+            generator_paths = [
+                os.path.expanduser("~/marine-radar-location-generator/generate_location.py"),
+                os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                            "marine-radar-location-generator", "generate_location.py"),
+            ]
+
+            generator_path = None
+            for p in generator_paths:
+                if os.path.isfile(p):
+                    generator_path = p
+                    break
+
+            if generator_path is None:
+                # Generator not found - skip location loading
+                return
+
+            # Generate location file
+            with tempfile.NamedTemporaryFile(suffix='.radarloc', delete=False) as tmp:
+                tmp_path = tmp.name
+
+            result = subprocess.run(
+                ["python", generator_path, f"{lat},{lon}",
+                 "--range", str(range_nm), "-o", tmp_path],
+                capture_output=True,
+                timeout=60
+            )
+
+            if result.returncode == 0 and os.path.isfile(tmp_path):
+                # Load the generated location file
+                self.scenario_manager.load_location_file(
+                    tmp_path,
+                    self.simulation.world,
+                    self.simulation.radar,
+                    self.simulation.weather,
+                    simulation=self.simulation
+                )
+                self.capture_label.set_text(self.capture_label.text + " +loc")
+
+            # Clean up temp file
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        except Exception:
+            # Location generation failed - not critical, capture still loaded
+            pass
 
     # --- Validation callbacks ---
 
