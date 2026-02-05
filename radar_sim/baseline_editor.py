@@ -213,17 +213,30 @@ class CaptureAnalyzer:
                     if not self._metadata_cache.get('range_extracted'):
                         try:
                             range_val = float(row[range_col])
-                            # Interpret range value - common Furuno range codes
-                            if range_val < 20:  # Likely a range code (0-9 typical)
-                                # Furuno range codes (index = code)
-                                range_map = {
-                                    0: 0.125, 1: 0.25, 2: 0.5, 3: 0.75,
-                                    4: 1.5, 5: 3, 6: 6, 7: 12, 8: 24, 9: 48,
-                                    # Alternative mapping if codes start at 1
-                                    10: 0.125, 11: 0.25, 12: 0.5
-                                }
-                                self._range_m = range_map.get(int(range_val), 3) * 1852.0
-                                print(f"[CaptureAnalyzer] Range code {int(range_val)} -> {self._range_m/1852:.2f} nm")
+                            # Standard Furuno marine radar range scales (nm)
+                            # Index 0-11 mapping to standard range rings
+                            if range_val < 20:  # Likely a range code
+                                furuno_ranges_nm = [
+                                    0.125,  # 0
+                                    0.25,   # 1
+                                    0.5,    # 2
+                                    0.75,   # 3
+                                    1.5,    # 4
+                                    3.0,    # 5
+                                    6.0,    # 6
+                                    12.0,   # 7
+                                    24.0,   # 8
+                                    48.0,   # 9
+                                    72.0,   # 10
+                                    96.0,   # 11
+                                ]
+                                idx = int(range_val)
+                                if 0 <= idx < len(furuno_ranges_nm):
+                                    range_nm = furuno_ranges_nm[idx]
+                                else:
+                                    range_nm = 6.0  # Default fallback
+                                self._range_m = range_nm * 1852.0
+                                print(f"[CaptureAnalyzer] Furuno range code {idx} -> {range_nm} nm")
                             else:
                                 self._range_m = range_val
                                 print(f"[CaptureAnalyzer] Range value: {range_val} m")
