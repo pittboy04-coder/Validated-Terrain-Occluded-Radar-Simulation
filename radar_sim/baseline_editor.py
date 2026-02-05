@@ -175,7 +175,25 @@ class CaptureAnalyzer:
                 meta_cols = 5
                 angle_scale = 8192.0 / 360.0
 
-            num_bins = len(header) - meta_cols
+            # Read first data row to get actual column count
+            # (header may only label first echo column as "EchoValues")
+            first_row = next(reader, None)
+            if first_row is None:
+                return None
+
+            num_bins = len(first_row) - meta_cols
+            if num_bins <= 0:
+                return None
+
+            # Process first row
+            try:
+                angle_raw = float(first_row[angle_col])
+                bearing_deg = angle_raw / angle_scale
+                bearing_idx = int(round(bearing_deg)) % 360
+                values = [float(v) for v in first_row[meta_cols:]]
+                rows_by_bearing[bearing_idx] = values
+            except (ValueError, IndexError):
+                pass
 
             # Extract range info
             if 'range' in header_lower:
@@ -242,7 +260,7 @@ class CaptureAnalyzer:
                 reader = csv.reader(f)
                 next(reader)  # skip header
                 for i, row in enumerate(reader):
-                    if i > 500:  # Sample first 500 rows
+                    if i > 2000:  # Sample more rows to see full rotation
                         break
                     try:
                         angles.append(float(row[angle_col]))
@@ -255,13 +273,21 @@ class CaptureAnalyzer:
             return 1.0
 
         max_angle = max(angles)
-        min_angle = min(angles)
 
-        # Detect scale based on range
-        if max_angle > 4000:  # Likely 0-8192 ticks
+        # Detect scale based on max value seen
+        if max_angle > 7000:  # Likely 0-8192 ticks (full rotation)
             return 8192.0 / 360.0
-        elif max_angle > 360:  # Likely 0-4096 or similar
-            return max_angle / 360.0
+        elif max_angle > 3500:  # Likely 0-4096 ticks
+            return 4096.0 / 360.0
+        elif max_angle > 1000:  # Partial rotation with some tick system
+            # Estimate: assume we see about half a rotation in the sample
+            # Common systems: 4096, 8192 ticks per rotation
+            if max_angle > 2000:
+                return 4096.0 / 360.0  # ~11.38 ticks per degree
+            else:
+                return 2048.0 / 360.0
+        elif max_angle > 360:  # Likely 0-1024 or similar
+            return 1024.0 / 360.0
         else:  # Likely already in degrees
             return 1.0
 
@@ -347,16 +373,20 @@ class CaptureAnalyzer:
         bin_size = self._range_m / num_bins
 
         # Compute adaptive threshold based on data statistics
+        max_val = self._accumulated.max()
         nonzero_mask = self._accumulated > 0.01
         if np.any(nonzero_mask):
             data_mean = np.mean(self._accumulated[nonzero_mask])
             data_std = np.std(self._accumulated[nonzero_mask])
-            # Threshold = mean + 1 std dev (catches strong persistent returns)
-            threshold = max(0.1, data_mean + data_std * 0.5)
+            # Use percentile-based threshold (top 20% of non-zero values)
+            threshold = np.percentile(self._accumulated[nonzero_mask], 80)
+            # Clamp to reasonable range
+            threshold = max(0.1, min(threshold, max_val * 0.8))
         else:
             threshold = 0.2
 
         print(f"[CaptureAnalyzer] Data range: {self._accumulated.min():.3f} - {self._accumulated.max():.3f}")
+        print(f"[CaptureAnalyzer] Non-zero mean: {data_mean:.3f}, std: {data_std:.3f}")
         print(f"[CaptureAnalyzer] Using threshold: {threshold:.3f}")
 
         # Find connected components of high-intensity returns
@@ -389,9 +419,11 @@ class CaptureAnalyzer:
                 mean_intensity = np.mean(blob_intensities)
                 blob_size = len(blob)
 
-                # RCS estimation: larger blobs with higher intensity = larger RCS
-                # Typical mapping: intensity 0.3-0.8 → RCS 10-1000 m²
-                estimated_rcs = blob_size * mean_intensity * 100
+                # RCS estimation: map blob characteristics to realistic values
+                # Small boat: 10-50 m², cargo ship: 1000-10000 m², large tanker: 10000+ m²
+                # Use log scale to compress the range
+                raw_rcs = blob_size * mean_intensity * 50
+                estimated_rcs = min(50000, max(10, raw_rcs))  # Clamp to realistic range
 
                 objects.append((center_range_m, center_bearing, estimated_rcs))
 
