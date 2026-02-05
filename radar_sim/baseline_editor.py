@@ -84,11 +84,15 @@ class CaptureAnalyzer:
         self._metadata_cache = {}
 
         # Process each file
+        print(f"[CaptureAnalyzer] Processing {len(csv_files)} CSV files...")
         for csv_path in csv_files:
             self._process_csv_file(csv_path)
 
         if self._accumulated is None or self._num_sweeps == 0:
+            print("[CaptureAnalyzer] No data accumulated from CSV files")
             return None
+
+        print(f"[CaptureAnalyzer] Accumulated {self._num_sweeps} sweeps, shape: {self._accumulated.shape}")
 
         # Build metadata
         metadata = CaptureMetadata()
@@ -114,30 +118,152 @@ class CaptureAnalyzer:
 
     def _process_csv_file(self, csv_path: str) -> None:
         """Process a single CSV file into the accumulation buffer."""
-        from .validation.capture_loader import load_furuno_csv
-
-        ppi = load_furuno_csv(csv_path)
+        ppi = self._load_csv_flexible(csv_path)
         if ppi is None:
             return
 
+        # Normalize to 0-1 range if needed
+        ppi = ppi.astype(np.float32)
+        max_val = np.max(ppi)
+        if max_val > 1.5:  # Likely 0-255 or similar range
+            ppi = ppi / max_val
+
         if self._accumulated is None:
-            self._accumulated = ppi.astype(np.float32)
+            self._accumulated = ppi
         else:
             # Accumulate maximum values for persistent object detection
             self._accumulated = np.maximum(self._accumulated, ppi)
 
         self._num_sweeps += 1
 
-        # Extract range from first row
+    def _load_csv_flexible(self, csv_path: str) -> Optional[np.ndarray]:
+        """Load CSV with flexible format detection.
+
+        Supports:
+        - Format A: Status,Scale,Range,Gain,Angle,EchoValues... (your format)
+        - Format B: timestamp,unused,range_m,gain_code,angle_ticks,bins... (Furuno)
+        """
+        if not os.path.isfile(csv_path):
+            return None
+
+        rows_by_bearing = {}
+        num_bins = 0
+
+        with open(csv_path, 'r') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if header is None:
+                return None
+
+            # Detect format from header
+            header_lower = [h.lower().strip() for h in header]
+
+            # Determine column indices and angle scaling
+            if 'angle' in header_lower:
+                # Format A: Status,Scale,Range,Gain,Angle,EchoValues
+                angle_col = header_lower.index('angle')
+                meta_cols = angle_col + 1
+                # Detect angle scaling from first data row
+                angle_scale = self._detect_angle_scale(csv_path, angle_col)
+            elif 'angle_ticks' in header_lower:
+                angle_col = header_lower.index('angle_ticks')
+                meta_cols = angle_col + 1
+                angle_scale = 8192.0 / 360.0  # Standard ticks
+            else:
+                # Assume column 4 is angle (Furuno format)
+                angle_col = 4
+                meta_cols = 5
+                angle_scale = 8192.0 / 360.0
+
+            num_bins = len(header) - meta_cols
+
+            # Extract range info
+            if 'range' in header_lower:
+                range_col = header_lower.index('range')
+            else:
+                range_col = 2
+
+            for row in reader:
+                if len(row) < meta_cols + 1:
+                    continue
+                try:
+                    angle_raw = float(row[angle_col])
+                    bearing_deg = angle_raw / angle_scale if angle_scale != 1.0 else angle_raw
+                    bearing_idx = int(round(bearing_deg)) % 360
+
+                    # Get range from this row (for first row only)
+                    if not self._metadata_cache.get('range_extracted'):
+                        try:
+                            range_val = float(row[range_col])
+                            # Interpret range value - common Furuno range codes
+                            if range_val < 20:  # Likely a range code (0-9 typical)
+                                # Furuno range codes (index = code)
+                                range_map = {
+                                    0: 0.125, 1: 0.25, 2: 0.5, 3: 0.75,
+                                    4: 1.5, 5: 3, 6: 6, 7: 12, 8: 24, 9: 48,
+                                    # Alternative mapping if codes start at 1
+                                    10: 0.125, 11: 0.25, 12: 0.5
+                                }
+                                self._range_m = range_map.get(int(range_val), 3) * 1852.0
+                                print(f"[CaptureAnalyzer] Range code {int(range_val)} -> {self._range_m/1852:.2f} nm")
+                            else:
+                                self._range_m = range_val
+                                print(f"[CaptureAnalyzer] Range value: {range_val} m")
+                            self._metadata_cache['range_extracted'] = True
+                        except (ValueError, IndexError):
+                            pass
+
+                    values = []
+                    for j in range(meta_cols, min(len(row), meta_cols + num_bins)):
+                        values.append(float(row[j]))
+                    while len(values) < num_bins:
+                        values.append(0.0)
+
+                    # Keep latest sweep for each bearing
+                    rows_by_bearing[bearing_idx] = values
+                except (ValueError, IndexError):
+                    continue
+
+        if not rows_by_bearing or num_bins == 0:
+            return None
+
+        # Build 360 x num_bins array
+        ppi = np.zeros((360, num_bins), dtype=np.float32)
+        for bearing_idx, values in rows_by_bearing.items():
+            ppi[bearing_idx, :] = values[:num_bins]
+
+        return ppi
+
+    def _detect_angle_scale(self, csv_path: str, angle_col: int) -> float:
+        """Detect angle scaling by looking at angle value range."""
+        angles = []
         try:
             with open(csv_path, 'r') as f:
                 reader = csv.reader(f)
                 next(reader)  # skip header
-                first_row = next(reader, None)
-                if first_row and len(first_row) > 2:
-                    self._range_m = float(first_row[2])
-        except (ValueError, IndexError, OSError):
-            pass
+                for i, row in enumerate(reader):
+                    if i > 500:  # Sample first 500 rows
+                        break
+                    try:
+                        angles.append(float(row[angle_col]))
+                    except (ValueError, IndexError):
+                        continue
+        except IOError:
+            return 1.0
+
+        if not angles:
+            return 1.0
+
+        max_angle = max(angles)
+        min_angle = min(angles)
+
+        # Detect scale based on range
+        if max_angle > 4000:  # Likely 0-8192 ticks
+            return 8192.0 / 360.0
+        elif max_angle > 360:  # Likely 0-4096 or similar
+            return max_angle / 360.0
+        else:  # Likely already in degrees
+            return 1.0
 
     def _estimate_gain(self) -> float:
         """Estimate gain setting from average echo intensity.
@@ -220,8 +346,18 @@ class CaptureAnalyzer:
         num_bins = self._accumulated.shape[1]
         bin_size = self._range_m / num_bins
 
-        # Threshold for object detection (persistent strong returns)
-        threshold = 0.4 if self._estimate_gain() > 0.5 else 0.3
+        # Compute adaptive threshold based on data statistics
+        nonzero_mask = self._accumulated > 0.01
+        if np.any(nonzero_mask):
+            data_mean = np.mean(self._accumulated[nonzero_mask])
+            data_std = np.std(self._accumulated[nonzero_mask])
+            # Threshold = mean + 1 std dev (catches strong persistent returns)
+            threshold = max(0.1, data_mean + data_std * 0.5)
+        else:
+            threshold = 0.2
+
+        print(f"[CaptureAnalyzer] Data range: {self._accumulated.min():.3f} - {self._accumulated.max():.3f}")
+        print(f"[CaptureAnalyzer] Using threshold: {threshold:.3f}")
 
         # Find connected components of high-intensity returns
         objects = []
@@ -237,7 +373,7 @@ class CaptureAnalyzer:
                 # Flood-fill to find blob extent
                 blob = self._flood_fill(bearing, range_bin, threshold, visited)
 
-                if len(blob) < 3:  # Too small, likely noise
+                if len(blob) < 2:  # Single pixel might be noise
                     continue
 
                 # Calculate blob center and size
